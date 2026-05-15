@@ -31,7 +31,10 @@ RCSB_PAGE_SIZE = 10000   # RCSB v2 hard cap per request
 def query_nmr_entries(min_conformers: int = 5, max_results: int = 20000) -> list:
     """
     Query RCSB for NMR structures with at least min_conformers models.
-    Filters: SOLUTION NMR, protein, minimum conformer count.
+    Filters: SOLUTION NMR, protein only.
+    Conformer count is filtered later during parsing (the RCSB attribute
+    pdbx_nmr_ensemble.conformers_submitted_total_number is unreliable in
+    the v2 search API and triggers 400 errors).
     Paginates automatically if max_results > RCSB_PAGE_SIZE.
     """
     query_nodes = [
@@ -51,15 +54,6 @@ def query_nmr_entries(min_conformers: int = 5, max_results: int = 20000) -> list
                 "attribute": "rcsb_entry_info.polymer_entity_count_protein",
                 "operator":  "greater_or_equal",
                 "value":     1,
-            }
-        },
-        {
-            "type": "terminal",
-            "service": "text",
-            "parameters": {
-                "attribute": "pdbx_nmr_ensemble.conformers_submitted_total_number",
-                "operator":  "greater_or_equal",
-                "value":     min_conformers,
             }
         },
     ]
