@@ -179,6 +179,10 @@ class FlowMatchingGenerativeModel(nn.Module):
     def training_step(self, R1, t1, theta, z, seq_mask):
         return self.fm.training_step(R1, t1, theta, z, seq_mask)
 
+    def training_generate(self, theta, z_samples, seq_mask, n_conformers):
+        """Gradient-enabled generation for training. Delegates to FlowMatchingModule."""
+        return self.fm.training_generate(theta, z_samples, seq_mask, n_conformers)
+
     def generate(self, theta, z_samples, seq_mask, n_conformers, n_steps, method):
         return self.fm.generate(theta, z_samples, seq_mask,
                                 n_conformers=n_conformers,
@@ -249,6 +253,19 @@ class OTCFMGenerativeModel(nn.Module):
             "u_t":      u_t,
             "t_flow":   t_flow,
         }
+
+    def training_generate(self, theta, z_samples, seq_mask, n_conformers):
+        """Single Euler step, gradient-enabled, for training ensemble losses."""
+        B, L = theta.shape[:2]
+        device = theta.device
+        results = []
+        for n in range(n_conformers):
+            z  = z_samples[:, n]
+            xt = torch.randn(B, L, 3, device=device)
+            t  = torch.zeros(B, device=device)
+            v  = self.denoiser(xt, t, theta, z, seq_mask)
+            results.append(xt + v)
+        return torch.stack(results, dim=1)
 
     @torch.no_grad()
     def generate(self, theta, z_samples, seq_mask, n_conformers, n_steps, method):
@@ -335,6 +352,22 @@ class DDPMGenerativeModel(nn.Module):
             "t_flow":   t_norm,
         }
 
+    def training_generate(self, theta, z_samples, seq_mask, n_conformers):
+        """Single denoising step from high noise, gradient-enabled."""
+        B, L = theta.shape[:2]
+        device = theta.device
+        self._buffers_to(device)
+        results = []
+        for n in range(n_conformers):
+            z    = z_samples[:, n]
+            xt   = torch.randn(B, L, 3, device=device)
+            t_norm = torch.full((B,), 0.999, device=device)
+            eps_pred = self.denoiser(xt, t_norm, theta, z, seq_mask)
+            ab = self._alpha_bar[-1]
+            x0_pred = (xt - (1 - ab).sqrt() * eps_pred) / ab.sqrt().clamp(min=1e-8)
+            results.append(x0_pred.clamp(-5, 5))
+        return torch.stack(results, dim=1)
+
     @torch.no_grad()
     def generate(self, theta, z_samples, seq_mask, n_conformers, n_steps, method):
         B, L, _ = theta.shape
@@ -385,6 +418,12 @@ class DDIMGenerativeModel(DDPMGenerativeModel):
 
     def __init__(self, cfg: dict):
         super().__init__(cfg)
+
+    def training_generate(self, theta, z_samples, seq_mask, n_conformers):
+        """Inherited from DDPM — single denoising step, gradient-enabled."""
+        return DDPMGenerativeModel.training_generate(
+            self, theta, z_samples, seq_mask, n_conformers
+        )
 
     @torch.no_grad()
     def generate(self, theta, z_samples, seq_mask, n_conformers, n_steps, method):
@@ -447,6 +486,14 @@ class VAEGenerativeModel(nn.Module):
             "t_flow":   torch.ones(B, device=t1.device),
         }
 
+    def training_generate(self, theta, z_samples, seq_mask, n_conformers):
+        """Direct decoder forward — already gradient-enabled by design."""
+        return torch.stack(
+            [self.decoder(theta, z_samples[:, n], seq_mask)
+             for n in range(n_conformers)],
+            dim=1,
+        )
+
     @torch.no_grad()
     def generate(self, theta, z_samples, seq_mask, n_conformers, n_steps, method):
         # n_steps and method are ignored for VAE (single-pass)
@@ -498,6 +545,22 @@ class ScoreMatchingGenerativeModel(nn.Module):
             "u_t":      eps,
             "t_flow":   t_flow,
         }
+
+    def training_generate(self, theta, z_samples, seq_mask, n_conformers):
+        """Single score step from max noise, gradient-enabled."""
+        B, L = theta.shape[:2]
+        device = theta.device
+        results = []
+        for n in range(n_conformers):
+            z   = z_samples[:, n]
+            xt  = torch.randn(B, L, 3, device=device) * self.sigma_max
+            t   = torch.ones(B, device=device)
+            eps_pred = self.denoiser(xt, t, theta, z, seq_mask)
+            sig = self._sigma(t)[:, None, None]
+            score = -eps_pred / sig.clamp(min=1e-8)
+            x0_est = xt - sig ** 2 * score
+            results.append(x0_est)
+        return torch.stack(results, dim=1)
 
     @torch.no_grad()
     def generate(self, theta, z_samples, seq_mask, n_conformers, n_steps, method):

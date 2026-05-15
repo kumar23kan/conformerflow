@@ -165,14 +165,14 @@ class ConformerFlowModel(nn.Module):
         u_R = gen_out["u_R"]
         u_t = gen_out["u_t"]
 
-        # ── Generate ensemble for ensemble loss ──
+        # ── Generate ensemble for ensemble loss (gradient-enabled) ──
+        # training_generate() uses a single step without @torch.no_grad() so
+        # diversity_loss, ensemble_reconstruction_loss, and geometry_loss
+        # backpropagate into model parameters.
         z_gen = self.sampler(mu, log_var, n_samples=n_gen, use_full_cov=False)
-        gen_coords = self.generative.generate(
+        gen_coords = self.generative.training_generate(
             theta, z_gen, seq_mask,
             n_conformers = n_gen,
-            n_steps      = min(10, self.n_steps_inf),
-            method       = self.ode_method if self.gen_type == "flow_matching"
-                           else self.gen_type,
         )
 
         # Auxiliary heads — only active when multi_head.enabled = true

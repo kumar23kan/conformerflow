@@ -772,6 +772,41 @@ class FlowMatchingModule(nn.Module):
                 "u_t":      flow["u_t"],    # target translation — same draw as prediction
                 }
 
+    def training_sample_one(self,
+                             theta:    torch.Tensor,
+                             z:        torch.Tensor,
+                             seq_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Single Euler step from noise → x_1 estimate. Gradient-enabled.
+        Used during training so ensemble/diversity/geometry losses
+        actually backpropagate into model parameters.
+        Quality is lower than full ODE but sufficient for loss supervision.
+        """
+        B, L = theta.shape[:2]
+        device = theta.device
+        R, t_coord = sample_random_frames(B, L, device)
+        t_flow = torch.zeros(B, device=device)
+        v_R, v_t = self.transformer(R, t_coord, t_flow, theta, z, seq_mask)
+        t_out = t_coord + v_t
+        if seq_mask is not None:
+            t_out = t_out * seq_mask.float().unsqueeze(-1)
+        return t_out
+
+    def training_generate(self,
+                           theta:        torch.Tensor,
+                           z_samples:    torch.Tensor,
+                           seq_mask:     torch.Tensor,
+                           n_conformers: int) -> torch.Tensor:
+        """
+        Gradient-enabled multi-conformer generation for training losses.
+        Returns (B, N, L, 3) CA coordinates with gradient.
+        """
+        return torch.stack(
+            [self.training_sample_one(theta, z_samples[:, n], seq_mask)
+             for n in range(n_conformers)],
+            dim=1,
+        )
+
     @torch.no_grad()
     def generate(self,
                  theta:        torch.Tensor,
