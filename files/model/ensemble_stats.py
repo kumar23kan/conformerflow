@@ -36,14 +36,16 @@ class EnsembleStatisticsModule(nn.Module):
     """
 
     def __init__(self,
-                 d_model:   int = 256,
-                 d_latent:  int = 128,
-                 n_heads:   int = 8,
-                 dropout:   float = 0.1):
+                 d_model:    int = 256,
+                 d_latent:   int = 128,
+                 n_heads:    int = 8,
+                 dropout:    float = 0.1,
+                 latent_type: str = "per_residue"):
         super().__init__()
-        self.d_model  = d_model
-        self.d_latent = d_latent
-        self.n_heads  = n_heads
+        self.d_model     = d_model
+        self.d_latent    = d_latent
+        self.n_heads     = n_heads
+        self.latent_type = latent_type   # "per_residue" | "global"
 
         # ── Per-residue statistics ──
         # Project mean and variance of conformer embeddings
@@ -166,8 +168,18 @@ class EnsembleStatisticsModule(nn.Module):
         Sigma = (Sigma + Sigma.permute(0, 2, 1, 3)) * 0.5
 
         # ── Step 4: Distribution parameters μ, log_var ──
-        mu      = self.mu_head(mean_feat)      # (B, L, d_latent)
-        log_var = self.logvar_head(var_feat)   # (B, L, d_latent)
+        if self.latent_type == "global":
+            # Pool over valid residues to get a single global vector per protein
+            s_mask = seq_mask.float().unsqueeze(-1)            # (B, L, 1)
+            n_res  = s_mask.sum(dim=1).clamp(min=1)           # (B, 1)
+            h_pooled = (mean_feat * s_mask).sum(dim=1) / n_res  # (B, d_model)
+            mu      = self.mu_head(h_pooled)                   # (B, d_latent)
+            log_var = self.logvar_head(
+                (var_feat * s_mask).sum(dim=1) / n_res         # (B, d_model)
+            )                                                  # (B, d_latent)
+        else:
+            mu      = self.mu_head(mean_feat)      # (B, L, d_latent)
+            log_var = self.logvar_head(var_feat)   # (B, L, d_latent)
         # Clamp log_var for stability
         log_var = log_var.clamp(-10, 4)
 
@@ -202,26 +214,33 @@ class DistributionSampler(nn.Module):
                        log_var: torch.Tensor,
                        n_samples: int = 1) -> torch.Tensor:
         """
-        Reparameterization trick: z = μ + ε * σ
-        where ε ~ N(0, I)
+        Reparameterization trick: z = μ + ε * σ  where ε ~ N(0, I)
 
         Args:
-            mu:       (B, L, d_latent)
-            log_var:  (B, L, d_latent)
+            mu:       (B, L, d_latent)  per-residue  OR  (B, d_latent) global
+            log_var:  same shape as mu
             n_samples: number of samples to draw
 
         Returns:
-            z: (B, n_samples, L, d_latent)
+            z: (B, n_samples, L, d_latent)  per-residue
+               (B, n_samples, d_latent)     global
         """
-        std = torch.exp(0.5 * log_var)   # (B, L, d_latent)
+        std = torch.exp(0.5 * log_var)
 
-        # Sample n_samples noise vectors
-        eps = torch.randn(
-            mu.shape[0], n_samples, mu.shape[1], self.d_latent,
-            device=mu.device, dtype=mu.dtype
-        )   # (B, n_samples, L, d_latent)
-
-        z = mu.unsqueeze(1) + eps * std.unsqueeze(1)   # (B, n_samples, L, d_latent)
+        if mu.dim() == 2:
+            # Global latent: (B, d_latent)
+            eps = torch.randn(
+                mu.shape[0], n_samples, self.d_latent,
+                device=mu.device, dtype=mu.dtype
+            )  # (B, n_samples, d_latent)
+            z = mu.unsqueeze(1) + eps * std.unsqueeze(1)  # (B, n_samples, d_latent)
+        else:
+            # Per-residue latent: (B, L, d_latent)
+            eps = torch.randn(
+                mu.shape[0], n_samples, mu.shape[1], self.d_latent,
+                device=mu.device, dtype=mu.dtype
+            )  # (B, n_samples, L, d_latent)
+            z = mu.unsqueeze(1) + eps * std.unsqueeze(1)  # (B, n_samples, L, d_latent)
         return z
 
     def sample_with_covariance(self,

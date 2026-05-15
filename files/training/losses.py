@@ -164,17 +164,21 @@ def kl_divergence_loss(mu:      torch.Tensor,
 
     Returns dict: kl_loss
     """
-    # Per-element KL: (B, L, d_latent)
+    # Per-element KL: (B, L, d_latent) per-residue or (B, d_latent) global
     kl_elem = -0.5 * (1 + log_var - mu.pow(2) - log_var.exp())
 
-    # Free bits: clamp per latent dimension
-    # Average over batch and sequence, then clamp
-    kl_per_dim = kl_elem.mean(dim=[0, 1])             # (d_latent,)
-    kl_clamped = kl_per_dim.clamp(min=free_bits)
-
-    # Mask: only count real residues
-    m      = mask.float().unsqueeze(-1)                # (B, L, 1)
-    kl_sum = (kl_elem * m).sum() / (m.sum() + 1e-8)
+    if mu.dim() == 2:
+        # Global latent: no residue dimension to mask
+        kl_per_dim = kl_elem.mean(dim=0)              # (d_latent,)
+        kl_clamped = kl_per_dim.clamp(min=free_bits)
+        kl_sum     = kl_elem.mean()
+    else:
+        # Per-residue latent: average over batch and sequence, then clamp
+        kl_per_dim = kl_elem.mean(dim=[0, 1])         # (d_latent,)
+        kl_clamped = kl_per_dim.clamp(min=free_bits)
+        # Mask: only count real residues
+        m      = mask.float().unsqueeze(-1)            # (B, L, 1)
+        kl_sum = (kl_elem * m).sum() / (m.sum() + 1e-8)
 
     return {
         "kl_loss":     kl_clamped.mean(),

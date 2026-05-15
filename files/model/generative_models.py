@@ -101,7 +101,9 @@ class _DenoisingTransformer(nn.Module):
 
         t_emb = self.time_embed(t[:, None].float())   # (B, d)
         t_emb = t_emb.unsqueeze(1).expand(-1, L, -1)  # (B, L, d)
-        z_emb = self.z_proj(z)                         # (B, L, d)  — z is per-residue
+        z_emb = self.z_proj(z)                         # (B, L, d) or (B, d)
+        if z_emb.dim() == 2:                           # global latent → broadcast
+            z_emb = z_emb.unsqueeze(1).expand(-1, L, -1)
 
         x = torch.cat([noisy_coords, theta, t_emb, z_emb], dim=-1)
         x = self.in_proj(x)
@@ -136,7 +138,9 @@ class _VAEDecoder(nn.Module):
 
     def forward(self, theta, z, seq_mask):
         B, L, _ = theta.shape
-        z_emb = self.z_proj(z)                            # (B, L, d) — per-residue
+        z_emb = self.z_proj(z)                            # (B, L, d) or (B, d)
+        if z_emb.dim() == 2:                              # global latent → broadcast
+            z_emb = z_emb.unsqueeze(1).expand(-1, L, -1)
         x = self.in_proj(torch.cat([theta, z_emb], dim=-1))
 
         pad_key = ~seq_mask

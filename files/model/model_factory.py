@@ -44,11 +44,13 @@ def build_ensemble_stats(cfg: dict) -> tuple:
 
     from model.ensemble_stats import EnsembleStatisticsModule, DistributionSampler
 
+    latent_type = es.get("latent_type", "per_residue")
     stats = EnsembleStatisticsModule(
-        d_model   = arch["d_model"],
-        d_latent  = arch["d_latent"],
-        n_heads   = arch["n_heads"],
-        dropout   = arch["dropout"],
+        d_model     = arch["d_model"],
+        d_latent    = arch["d_latent"],
+        n_heads     = arch["n_heads"],
+        dropout     = arch["dropout"],
+        latent_type = latent_type,
     )
     sampler = DistributionSampler(d_latent=arch["d_latent"])
 
@@ -265,6 +267,7 @@ def build_model(cfg: dict) -> ConformerFlowModel:
         f"encoder={cfg['representation']['structure']} "
         f"gen={cfg['generative_model']['type']} "
         f"cov={cfg['ensemble_stats']['covariance']} "
+        f"latent={cfg['ensemble_stats'].get('latent_type', 'per_residue')} "
         f"multi_head={cfg.get('multi_head', {}).get('enabled', False)} "
     )
     logger.info(

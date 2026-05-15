@@ -32,6 +32,7 @@ ensemble_stats:
   covariance:  full_covariance   # full_covariance | diagonal | pca_topk | attention
   free_bits:   0.5
   n_pca_modes: 10
+  latent_type: per_residue       # per_residue | global  (ablation: global pools over L)
 
 training:
   batch_size:       4

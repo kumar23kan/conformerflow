@@ -394,7 +394,9 @@ class FrameTransformer(nn.Module):
         t_emb = t_emb.unsqueeze(1).expand(B, L, -1)    # (B, L, d_model)
 
         # ── Latent ──
-        h_z = self.latent_proj(z)                       # (B, L, d_model)
+        h_z = self.latent_proj(z)                       # (B, L, d_model) or (B, d_model)
+        if h_z.dim() == 2:                              # global latent → broadcast
+            h_z = h_z.unsqueeze(1).expand(-1, L, -1)   # (B, L, d_model)
 
         # ── Fuse inputs ──
         h = self.input_fuse(
