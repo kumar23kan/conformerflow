@@ -66,7 +66,11 @@ Sequence redundancy is then removed at 30% identity using MMseqs2, and the datas
 
 ---
 
-## Stage 2 — SE(3) Frame Representation
+## Stage 2 — Structure Representation
+
+The first step is converting raw backbone coordinates into a per-residue feature representation. Four options are available, selected via `representation.structure` in the config.
+
+### `se3_frames` (default)
 
 Every residue is represented as a local reference frame in 3D space, constructed from the backbone geometry in `frames.py`.
 
@@ -75,28 +79,64 @@ For residue `i`:
 2. Apply Gram-Schmidt orthogonalization to get three orthonormal axes
 3. The result is a rotation matrix `R_i` (3×3) and a translation `t_i` (the Cα position)
 
-This gives each residue an element of SE(3) — the group of rigid body motions in 3D space.
-
-**Why SE(3) frames?** Because global rotation and translation of the entire protein must not change the model's output. Relative frames between residues `i` and `j` are defined as:
+This gives each residue an element of SE(3) — the group of rigid body motions in 3D space. Relative frames between residues `i` and `j` are:
 
 ```
 R_rel = R_i @ R_j^T
 t_rel = R_i @ (t_j - t_i)
 ```
 
-These quantities are invariant to global rigid body motions: any global rotation `G` applied to both frames cancels exactly in the relative computation. This guarantee is exact, not approximate.
+Any global rotation applied to the whole protein cancels exactly. This is an exact guarantee, not an approximation. Chirality is preserved because the frame handedness encodes it.
+
+### `distance_matrix`
+
+Pairwise Cα distances are encoded with 64 radial basis functions (RBFs) spanning 0–40 Å. For each residue, the row-wise maximum of the RBF responses across all neighbours is used as the per-residue feature.
+
+- **SE(3)-invariant**: distances are unchanged by rotation or translation
+- **Loses chirality**: mirror-image structures produce identical distance matrices
+- Faster to compute than full frames; useful as an ablation baseline
+
+### `torsion_angles`
+
+Backbone dihedral angles φ, ψ, and ω are computed from N, Cα, C atom positions and encoded as `(sin, cos)` pairs to avoid discontinuities at ±π. This gives 6 features per residue.
+
+- **SE(3)-invariant**: torsion angles are unchanged by global rigid body motion
+- Very compact input (6 values vs. a full distance matrix)
+- Loses absolute 3D context — two residues with the same local geometry but different spatial arrangement are indistinguishable
+- Boundary residues (first has no φ/ω, last has no ψ) are zero-padded
+
+### `cartesian`
+
+Raw Cα Cartesian coordinates (x, y, z), centred by subtracting the mean Cα position of each conformer before input.
+
+- **Not SE(3)-invariant**: different orientations of the same structure produce different inputs
+- Simplest possible representation; useful for debugging
+- Requires all training structures to be pre-aligned if used seriously
+
+### Representation Comparison
+
+| Option | SE(3)-invariant | Preserves chirality | Relative cost |
+|--------|----------------|---------------------|---------------|
+| `se3_frames` | Yes (exact) | Yes | Medium |
+| `distance_matrix` | Yes | No | Low |
+| `torsion_angles` | Yes | Yes | Low |
+| `cartesian` | No | Yes | Lowest |
 
 ---
 
 ## Stage 3 — Encoder
 
-The encoder (`encoder.py`) transforms raw frames and sequence into rich per-residue embeddings using **Invariant Point Attention (IPA)**, the same mechanism used in AlphaFold2.
+The encoder (`encoders.py`) projects the chosen structure representation plus sequence features into rich per-residue embeddings of shape `(B, M, L, d_model)`.
 
-IPA combines two types of features per attention head:
+All four structure representations share the same transformer backbone (`_TransformerStack`), sinusoidal positional encoding, and sequence input. What differs is only the input projection layer.
+
+**For `se3_frames`**, the encoder uses **Invariant Point Attention (IPA)** from `encoder.py` — the same mechanism as AlphaFold2. IPA combines two types of features per attention head:
 1. **Scalar features** — standard dot-product attention over per-residue embeddings
-2. **Point features** — learnable 3D query/key points that are transformed into local frames before computing distances
+2. **Point features** — learnable 3D query/key points transformed into local frames before computing distances
 
-Both contributions are SE(3)-invariant by construction. The output is a tensor of shape `(B, L, d_model)` where `d_model = 256` by default.
+Both are SE(3)-invariant by construction. The output is `(B, M, L, d_model)` where `d_model = 256` by default.
+
+**For the other three representations**, a standard multi-head self-attention transformer is used after projecting the respective features to `d_model`.
 
 Sequence encoding supports:
 - One-hot amino acid identity (default)
