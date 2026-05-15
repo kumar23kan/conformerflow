@@ -685,21 +685,125 @@ def compute_clash_score(ca_coords: np.ndarray,
 
 
 # ─────────────────────────────────────────────────────────
+# BACKBONE RECONSTRUCTION FROM CA TRACE
+# ─────────────────────────────────────────────────────────
+
+def reconstruct_backbone_from_ca(ca_coords: np.ndarray) -> np.ndarray:
+    """
+    Approximate N and C backbone positions from a CA-only trace.
+
+    Uses three consecutive CA positions to define a local frame,
+    then places N_i and C_i at ideal bond lengths and angles within
+    that frame (N-CA bond 1.46 Å, CA-C bond 1.52 Å, N-CA-C 111.2°).
+    For terminal residues the trace is linearly extrapolated one step.
+
+    This allows Ramachandran analysis on CA-only model outputs.
+    Accuracy is sufficient for population-level Ramachandran statistics
+    (favoured / allowed / outlier fractions); per-residue angles will
+    differ slightly from true backbone geometry.
+
+    Args:
+        ca_coords: (N, L, 3)
+
+    Returns:
+        backbone: (N, L, 4, 3)  atoms ordered [N, CA, C, CB]
+                  CB column is zeros (not reconstructed).
+    """
+    N, L, _ = ca_coords.shape
+    backbone = np.zeros((N, L, 4, 3))
+    backbone[:, :, 1, :] = ca_coords   # CA at atom index 1
+
+    # Half the N-CA-C angle (111.2°) used to place N and C symmetrically
+    # around the bisector of the CA_{i-1}-CA_i-CA_{i+1} angle.
+    half_ncc = np.radians(111.2 / 2)   # ~55.6°
+    cos_h    = np.cos(half_ncc)
+    sin_h    = np.sin(half_ncc)
+    r_n, r_c = 1.46, 1.52              # bond lengths in Ångström
+
+    for n in range(N):
+        ca = ca_coords[n]  # (L, 3)
+
+        # Pad endpoints by linear extrapolation
+        ca_ext = np.concatenate([
+            (2 * ca[0]   - ca[1]  )[None],   # virtual CA_{-1}
+            ca,
+            (2 * ca[-1]  - ca[-2] )[None],   # virtual CA_{L}
+        ], axis=0)  # (L+2, 3)
+
+        for i in range(L):
+            ca_prev = ca_ext[i]        # CA_{i-1}
+            ca_i    = ca_ext[i + 1]    # CA_i
+            ca_next = ca_ext[i + 2]    # CA_{i+1}
+
+            # Local "forward" and "back" unit vectors
+            v_fwd = ca_next - ca_i
+            v_bck = ca_prev - ca_i
+            norm_fwd = np.linalg.norm(v_fwd)
+            norm_bck = np.linalg.norm(v_bck)
+            if norm_fwd < 1e-8 or norm_bck < 1e-8:
+                continue
+            v_fwd /= norm_fwd
+            v_bck /= norm_bck
+
+            # Bisector direction (into the N-CA-C angle)
+            bisect = v_fwd + v_bck
+            bisect_n = np.linalg.norm(bisect)
+            if bisect_n < 1e-8:
+                bisect = v_fwd
+            else:
+                bisect /= bisect_n
+
+            # Out-of-plane direction
+            perp = np.cross(v_fwd, v_bck)
+            perp_n = np.linalg.norm(perp)
+            if perp_n < 1e-8:
+                # Degenerate: pick arbitrary perpendicular
+                perp = np.array([0.0, 0.0, 1.0])
+                if abs(np.dot(bisect, perp)) > 0.9:
+                    perp = np.array([0.0, 1.0, 0.0])
+            else:
+                perp /= perp_n
+
+            # In-plane direction perpendicular to bisect
+            in_plane = np.cross(perp, bisect)
+            ip_n = np.linalg.norm(in_plane)
+            if ip_n < 1e-8:
+                continue
+            in_plane /= ip_n
+
+            # Place N and C symmetrically about the bisector in the CA plane
+            # N is "on the same side" as CA_{i-1}, C "on the same side" as CA_{i+1}
+            n_dir = cos_h * bisect - sin_h * in_plane
+            c_dir = cos_h * bisect + sin_h * in_plane
+
+            backbone[n, i, 0, :] = ca_i + r_n * n_dir   # N
+            backbone[n, i, 2, :] = ca_i + r_c * c_dir   # C
+
+    return backbone
+
+
+# ─────────────────────────────────────────────────────────
 # COMBINED EVALUATION
 # ─────────────────────────────────────────────────────────
 
-def evaluate_ensemble(pred_coords: np.ndarray,
-                       true_coords: np.ndarray,
-                       mask:        np.ndarray = None,
-                       pdb_id:      str = "") -> dict:
+def evaluate_ensemble(pred_coords:       np.ndarray,
+                       true_coords:       np.ndarray,
+                       mask:              np.ndarray = None,
+                       pdb_id:            str = "",
+                       true_backbone:     np.ndarray = None,
+                       pred_backbone:     np.ndarray = None) -> dict:
     """
     Run full evaluation suite comparing predicted vs NMR ensemble.
 
     Args:
-        pred_coords: (N_pred, L, 3)  generated CA coordinates
-        true_coords: (N_true, L, 3)  NMR CA coordinates
-        mask:        (L,) bool       True for real residues
-        pdb_id:      str             for logging
+        pred_coords:   (N_pred, L, 3)    generated CA coordinates
+        true_coords:   (N_true, L, 3)    NMR CA coordinates
+        mask:          (L,) bool         True for real residues
+        pdb_id:        str               for logging
+        true_backbone: (N_true, L, 4, 3) NMR backbone coords [N,CA,C,CB] for
+                                         Ramachandran on ground truth (optional)
+        pred_backbone: (N_pred, L, 4, 3) backbone for generated structures
+                                         (if None, reconstructed from CA trace)
 
     Returns:
         dict with all metrics organized by level
@@ -784,5 +888,33 @@ def evaluate_ensemble(pred_coords: np.ndarray,
         "clash_fraction":     clash["clash_fraction"],
         "total_clashes":      clash["total_clashes"],
     })
+
+    # ── Level 4b: Ramachandran quality (P2-3) ──
+    # Generated structures: use provided backbone or reconstruct from CA trace
+    try:
+        if pred_backbone is None:
+            pred_backbone_rc = reconstruct_backbone_from_ca(pred_aligned)
+        else:
+            pred_backbone_rc = pred_backbone
+        rama_pred = compute_ramachandran_quality(pred_backbone_rc)
+        results.update({
+            "rama_pred_favored":  rama_pred["rama_favored_frac"],
+            "rama_pred_allowed":  rama_pred["rama_allowed_frac"],
+            "rama_pred_outlier":  rama_pred["rama_outlier_frac"],
+        })
+    except Exception:
+        pass
+
+    # NMR ground truth: use provided backbone for exact φ/ψ angles
+    if true_backbone is not None:
+        try:
+            rama_true = compute_ramachandran_quality(true_backbone)
+            results.update({
+                "rama_true_favored": rama_true["rama_favored_frac"],
+                "rama_true_allowed": rama_true["rama_allowed_frac"],
+                "rama_true_outlier": rama_true["rama_outlier_frac"],
+            })
+        except Exception:
+            pass
 
     return results

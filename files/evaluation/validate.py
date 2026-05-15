@@ -60,14 +60,16 @@ class ConformerFlowValidator:
         self.method       = method
 
     def _load_nmr_coords(self, nmr_pdb_path: str) -> tuple:
-        """Load NMR ensemble CA coordinates and sequence."""
+        """Load NMR ensemble CA and full backbone coordinates plus sequence."""
         ensemble = parse_nmr_pdb(nmr_pdb_path)
         if ensemble is None:
-            return None, None
+            return None, None, None
         tensors  = ensemble_to_tensors(ensemble)
         # CA is atom index 1: (M, L, 3)
-        ca_coords = tensors["coords"][:, :, 1, :]
-        return ca_coords, ensemble.sequence
+        ca_coords       = tensors["coords"][:, :, 1, :]
+        # Full backbone [N, CA, C, CB]: (M, L, 4, 3)
+        backbone_coords = tensors["coords"]
+        return ca_coords, backbone_coords, ensemble.sequence
 
     def _load_xray_coords(self, xray_pdb_path: str) -> tuple:
         """Load X-ray structure CA coordinates and sequence."""
@@ -112,7 +114,7 @@ class ConformerFlowValidator:
 
         # ── Load NMR ground truth ──
         try:
-            true_coords, true_seq = self._load_nmr_coords(nmr_pdb)
+            true_coords, true_backbone, true_seq = self._load_nmr_coords(nmr_pdb)
             if true_coords is None:
                 raise ValueError("NMR parsing returned None")
         except Exception as e:
@@ -128,15 +130,18 @@ class ConformerFlowValidator:
         if L < 10:
             return {"pdb_id": pdb_id, "status": "too_short"}
 
-        pred_coords = pred_coords[:, :L, :]
-        true_coords = true_coords[:, :L, :]
+        pred_coords    = pred_coords[:, :L, :]
+        true_coords    = true_coords[:, :L, :]
+        true_backbone  = true_backbone[:, :L, :, :] if true_backbone is not None else None
 
         # ── Run all metrics ──
         try:
             metrics = evaluate_ensemble(
-                pred_coords = pred_coords,
-                true_coords = true_coords,
-                pdb_id      = pdb_id,
+                pred_coords   = pred_coords,
+                true_coords   = true_coords,
+                pdb_id        = pdb_id,
+                true_backbone = true_backbone,
+                # pred_backbone omitted → reconstructed from CA trace inside evaluate_ensemble
             )
             metrics["status"]          = "success"
             metrics["n_pred"]          = pred_coords.shape[0]
@@ -251,8 +256,11 @@ class ConformerFlowValidator:
             "covariance_frobenius_sim", "covariance_pearson_r",
             "top_mode_overlap",
             "bond_len_mean", "bond_len_mae", "bond_len_outliers",
-            "clash_score_per100",   # P2-4: MolProbity convention
+            "clash_score_per100",            # P2-4: MolProbity convention
             "clash_fraction",
+            # P2-3: Ramachandran quality
+            "rama_pred_favored", "rama_pred_allowed", "rama_pred_outlier",
+            "rama_true_favored", "rama_true_allowed", "rama_true_outlier",
         ]
 
         summary = {}
@@ -293,6 +301,9 @@ class ConformerFlowValidator:
             ("Level 4 — Physical Validity",
              ["bond_len_mean", "bond_len_mae",
               "bond_len_outliers", "clash_score_per100"]),
+            ("Level 4b — Ramachandran Quality (P2-3)",
+             ["rama_pred_favored", "rama_pred_allowed", "rama_pred_outlier",
+              "rama_true_favored", "rama_true_allowed", "rama_true_outlier"]),
         ]
 
         for section_name, metrics in sections:
