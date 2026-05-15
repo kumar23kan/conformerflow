@@ -3,6 +3,8 @@ ConformerFlow — Phase 1: PDB Data Fetcher
 Fetches NMR ensemble entries and paired X-ray structures from RCSB PDB.
 """
 
+import gzip
+import io
 import os
 import time
 import json
@@ -229,24 +231,32 @@ def fetch_deposition_dates(pdb_ids: list, max_workers: int = 8) -> dict:
 
 def download_pdb(pdb_id: str, out_dir: Path, file_format: str = "pdb"):
     """
-    Download a single PDB file.
-    file_format: 'pdb' for legacy format, 'cif' for mmCIF.
-    Returns path to downloaded file, or None on failure.
+    Download a single PDB file from RCSB.
+
+    RCSB serves compressed files only (.pdb.gz / .cif.gz).
+    This function fetches the .gz file and decompresses it in memory,
+    matching the behaviour of the official RCSB download shell script.
+
+    file_format: 'pdb' for legacy PDB format, 'cif' for mmCIF.
+    Returns path to the decompressed file, or None on failure.
     """
     pdb_id = pdb_id.upper()
-    ext = "pdb" if file_format == "pdb" else "cif"
+    ext      = "pdb" if file_format == "pdb" else "cif"
     out_path = out_dir / f"{pdb_id}.{ext}"
 
     if out_path.exists():
         return out_path  # already downloaded
 
-    url = f"{RCSB_DOWNLOAD}/{pdb_id}.{ext}"
+    # RCSB canonical URL — always .gz (matches official download script)
+    url = f"{RCSB_DOWNLOAD}/{pdb_id}.{ext}.gz"
     try:
-        resp = requests.get(url, timeout=60, stream=True)
+        resp = requests.get(url, timeout=60)
         resp.raise_for_status()
+        # Decompress in memory and write plain text
+        with gzip.open(io.BytesIO(resp.content)) as gz:
+            data = gz.read()
         with open(out_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+            f.write(data)
         return out_path
     except Exception as e:
         logger.warning(f"Failed to download {pdb_id}: {e}")
@@ -421,6 +431,27 @@ def run_fetch_pipeline(output_dir: str,
 
     logger.info("=== Fetch pipeline complete ===")
     return manifests
+
+
+# ──────────────────────────────────────────────
+# Convenience aliases (used by the Colab notebook)
+# ──────────────────────────────────────────────
+
+def fetch_nmr_ids(min_conformers: int = 5, max_results: int = 20000) -> list:
+    """Alias for query_nmr_entries — returns list of NMR PDB IDs."""
+    return query_nmr_entries(min_conformers=min_conformers,
+                             max_results=max_results)
+
+
+def download_pdbs(pdb_ids: list,
+                  output_dir: str,
+                  file_format: str = "pdb",
+                  max_workers: int = 8) -> dict:
+    """Alias for batch_download — downloads PDB files to output_dir."""
+    return batch_download(pdb_ids,
+                          out_dir=Path(output_dir),
+                          file_format=file_format,
+                          max_workers=max_workers)
 
 
 # ──────────────────────────────────────────────
