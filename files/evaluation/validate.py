@@ -23,6 +23,7 @@ from inference.predict    import ConformerFlowPredictor
 from data.parse_nmr       import parse_nmr_pdb, ensemble_to_tensors
 from data.parse_xray      import parse_xray_pdb
 from evaluation.metrics   import evaluate_ensemble
+from evaluation.minimize  import minimize_ensemble
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -50,14 +51,20 @@ class ConformerFlowValidator:
                  n_conformers:    int   = 20,
                  n_steps:         int   = 20,
                  method:          str   = "heun",
-                 device:          str   = "auto"):
+                 device:          str   = "auto",
+                 minimize:        bool  = False,
+                 minimize_steps:  int   = 1000,
+                 restraint_k:     float = 100.0):
 
         self.predictor    = ConformerFlowPredictor(
             checkpoint_path, device=device
         )
-        self.n_conformers = n_conformers
-        self.n_steps      = n_steps
-        self.method       = method
+        self.n_conformers   = n_conformers
+        self.n_steps        = n_steps
+        self.method         = method
+        self.minimize       = minimize
+        self.minimize_steps = minimize_steps
+        self.restraint_k    = restraint_k
 
     def _load_nmr_coords(self, nmr_pdb_path: str) -> tuple:
         """Load NMR ensemble CA and full backbone coordinates plus sequence."""
@@ -111,6 +118,24 @@ class ConformerFlowValidator:
             logger.warning(f"  Prediction failed: {e}")
             return {"pdb_id": pdb_id, "status": "prediction_failed",
                     "error": str(e)}
+
+        # ── Optional energy minimization (P3-3) ──
+        if self.minimize and pred_seq:
+            try:
+                min_result  = minimize_ensemble(
+                    pred_coords,
+                    sequence    = pred_seq,
+                    method      = "openmm",
+                    n_steps     = self.minimize_steps,
+                    restraint_k = self.restraint_k,
+                )
+                pred_coords = min_result["coords"]
+                logger.info(
+                    f"  Minimized {self.n_conformers - min_result['n_failed']}/"
+                    f"{self.n_conformers} conformers"
+                )
+            except Exception as e:
+                logger.warning(f"  Minimization failed ({e}) — using raw coords")
 
         # ── Load NMR ground truth ──
         try:
@@ -339,11 +364,17 @@ if __name__ == "__main__":
     parser.add_argument("--xray_dir",      required=True)
     parser.add_argument("--nmr_dir",       required=True)
     parser.add_argument("--output_dir",    default="validation_results")
-    parser.add_argument("--n_conformers",  type=int,   default=20)
-    parser.add_argument("--n_steps",       type=int,   default=20)
-    parser.add_argument("--method",        default="heun")
-    parser.add_argument("--max_proteins",  type=int,   default=None)
-    parser.add_argument("--device",        default="auto")
+    parser.add_argument("--n_conformers",   type=int,   default=20)
+    parser.add_argument("--n_steps",        type=int,   default=20)
+    parser.add_argument("--method",         default="heun")
+    parser.add_argument("--max_proteins",   type=int,   default=None)
+    parser.add_argument("--device",         default="auto")
+    parser.add_argument("--minimize",       action="store_true",
+                        help="Energy-minimize generated conformers with OpenMM before scoring")
+    parser.add_argument("--minimize_steps", type=int,   default=1000,
+                        help="Max L-BFGS iterations per conformer (default 1000)")
+    parser.add_argument("--restraint_k",    type=float, default=100.0,
+                        help="OpenMM position restraint stiffness kJ/mol/nm² (default 100)")
     args = parser.parse_args()
 
     validator = ConformerFlowValidator(
@@ -352,6 +383,9 @@ if __name__ == "__main__":
         n_steps         = args.n_steps,
         method          = args.method,
         device          = args.device,
+        minimize        = args.minimize,
+        minimize_steps  = args.minimize_steps,
+        restraint_k     = args.restraint_k,
     )
     validator.validate_dataset(
         pairs_json   = args.pairs_json,

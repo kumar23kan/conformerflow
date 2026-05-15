@@ -31,11 +31,21 @@ def main():
     parser.add_argument("--config",         default="configs/base_config.yaml")
     parser.add_argument("--no_auto_batch",  action="store_true")
 
+    # ── Training mode (single entry point) ──
+    parser.add_argument("--training_mode",
+        choices=["flow_matching","ot_cfm","ddpm","ddim","vae",
+                 "score_matching","multi_head"],
+        help="Sets generative_model.type and multi_head.enabled automatically")
+
     # ── Architecture choices ──
     parser.add_argument("--struct_repr",
         choices=["se3_frames","cartesian","distance_matrix","torsion_angles"])
     parser.add_argument("--generative_model",
-        choices=["flow_matching","ot_cfm","ddpm","ddim","vae","score_matching"])
+        choices=["flow_matching","ot_cfm","ddpm","ddim","vae","score_matching"],
+        help="Override generative model (prefer --training_mode for ablations)")
+    parser.add_argument("--latent_type",
+        choices=["per_residue","global"],
+        help="Latent variable type for ablation (per_residue=default, global=pooled)")
     parser.add_argument("--seq_encoder",
         choices=["onehot","esm2_650m","esm2_3b","prot_t5","none"])
     parser.add_argument("--ensemble_stats",
@@ -102,8 +112,10 @@ def main():
 
     # ── Apply all CLI overrides → nested config ──
     overrides = [
+        (args.training_mode,      "training_mode"),
         (args.struct_repr,        "representation.structure"),
         (args.generative_model,   "generative_model.type"),
+        (args.latent_type,        "ensemble_stats.latent_type"),
         (args.seq_encoder,        "representation.sequence"),
         (args.ensemble_stats,     "ensemble_stats.covariance"),
         (args.ode_method,         "generative_model.ode_method"),
