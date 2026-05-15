@@ -27,14 +27,14 @@ ensemble_stats:
   n_pca_modes: 10
 
 training:
-  batch_size:       4
+  batch_size:       2
   max_epochs:       100
   learning_rate:    0.0001
   weight_decay:     0.0001
   warmup_steps:     1000
   lr_decay_steps:   100000
   checkpoint_dir:   checkpoints
-  n_gen_conformers: 10
+  n_gen_conformers: 4
   val_every:        500
   save_every:       2000
   max_grad_norm:    1.0
@@ -59,6 +59,6 @@ logging:
   project_name: conformerflow
 
 data:
-  max_residues: 800
+  max_residues: 512
   pdb_data_dir: pdb_data
   max_workers:  4
