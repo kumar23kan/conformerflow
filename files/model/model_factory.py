@@ -94,6 +94,13 @@ class ConformerFlowModel(nn.Module):
         self.ensemble_stats, self.sampler = build_ensemble_stats(cfg)
         self.generative     = build_generative_model(cfg)
 
+        self.multi_head = cfg.get("multi_head", {}).get("enabled", False)
+        if self.multi_head:
+            from model.generative_models import VAEGenerativeModel, ScoreMatchingGenerativeModel
+            self.generative_vae   = VAEGenerativeModel(cfg)
+            self.generative_score = ScoreMatchingGenerativeModel(cfg)
+            logger.info("Multi-head training enabled: VAE + score matching auxiliary heads active")
+
         # Store key config values for convenience
         self.d_latent    = cfg["model"]["d_latent"]
         self.n_gen_train = cfg["training"].get("n_gen_conformers", 10)
@@ -168,6 +175,12 @@ class ConformerFlowModel(nn.Module):
                            else self.gen_type,
         )
 
+        # Auxiliary heads — only active when multi_head.enabled = true
+        score_out = vae_out = None
+        if self.multi_head:
+            score_out = self.generative_score.training_step(R1, t1, theta, z_single, seq_mask)
+            vae_out   = self.generative_vae.training_step(R1, t1, theta, z_single, seq_mask)
+
         return {
             "v_R_pred":      gen_out["v_R_pred"],
             "v_t_pred":      gen_out["v_t_pred"],
@@ -182,6 +195,10 @@ class ConformerFlowModel(nn.Module):
             # For chirality loss: full backbone of selected target conformer
             "target_coords": target_coords,   # (B, L, 4, 3)
             "atom_mask":     mask,            # (B, L, 4)
+            "score_v_t_pred": score_out["v_t_pred"] if score_out is not None else None,
+            "score_u_t":      score_out["u_t"]      if score_out is not None else None,
+            "vae_v_t_pred":   vae_out["v_t_pred"]   if vae_out   is not None else None,
+            "vae_u_t":        vae_out["u_t"]         if vae_out   is not None else None,
         }
 
     def count_parameters(self) -> dict:
@@ -189,6 +206,9 @@ class ConformerFlowModel(nn.Module):
         enc   = sum(p.numel() for p in self.encoder.parameters())
         es    = sum(p.numel() for p in self.ensemble_stats.parameters())
         gen   = sum(p.numel() for p in self.generative.parameters())
+        if self.multi_head:
+            gen += sum(p.numel() for p in self.generative_vae.parameters())
+            gen += sum(p.numel() for p in self.generative_score.parameters())
         return {"total": total, "encoder": enc,
                 "ensemble_stats": es, "generative": gen}
 
@@ -244,7 +264,8 @@ def build_model(cfg: dict) -> ConformerFlowModel:
         f"ConformerFlow built — "
         f"encoder={cfg['representation']['structure']} "
         f"gen={cfg['generative_model']['type']} "
-        f"cov={cfg['ensemble_stats']['covariance']}"
+        f"cov={cfg['ensemble_stats']['covariance']} "
+        f"multi_head={cfg.get('multi_head', {}).get('enabled', False)} "
     )
     logger.info(
         f"Parameters: total={params['total']:,} "

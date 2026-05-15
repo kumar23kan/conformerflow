@@ -2,7 +2,7 @@
 # All values can be overridden by CLI flags in train.py
 
 representation:
-  structure: se3_frames   # se3_frames (only implemented option)
+  structure: se3_frames   # se3_frames | cartesian | distance_matrix | torsion_angles
   sequence:  onehot       # onehot | esm2_650m | esm2_3b | prot_t5 | none
 
 model:
@@ -16,7 +16,7 @@ model:
   dropout:          0.1
 
 generative_model:
-  type:              flow_matching   # flow_matching (only implemented option)
+  type:              flow_matching   # flow_matching | ot_cfm | ddpm | ddim | vae | score_matching
   sigma_min:         0.01
   ode_method:        heun            # heun | euler | rk4
   n_inference_steps: 20
@@ -62,3 +62,12 @@ data:
   max_residues: 800
   pdb_data_dir: pdb_data
   max_workers:  4
+
+multi_head:
+  enabled:             false   # true to activate VAE + score_matching auxiliary heads
+  lambda_vae_start:    1.0     # VAE weight at epoch 0
+  lambda_vae_end:      0.0     # VAE weight after anneal_epochs
+  lambda_score_start:  0.0     # score weight at epoch 0
+  lambda_score_end:    0.1     # score weight after anneal_epochs
+  anneal_epochs:       20      # epochs over which weights transition
+  score_ema_alpha:     0.99    # EMA decay for score loss normalization

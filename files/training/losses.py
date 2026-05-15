@@ -315,7 +315,7 @@ def chirality_loss(backbone_coords: torch.Tensor,
 
 
 # ─────────────────────────────────────────────────────────
-# 6. GEOMETRY LOSS
+# 6. GEOMETRY LOSS  (renumbered; auxiliary head loss is 7 below)
 #    Generated structures should be physically valid:
 #    - CA-CA virtual bond lengths ≈ 3.8 Å
 #    - No severe clashes (CA-CA < 3.5 Å for non-bonded)
@@ -383,7 +383,33 @@ def geometry_loss(gen_coords: torch.Tensor,
 
 
 # ─────────────────────────────────────────────────────────
-# 7. COMBINED LOSS
+# 7. AUXILIARY HEAD LOSS
+#    Coordinate MSE for VAE and score matching heads.
+#    Both operate in coordinate space (no SE(3) rotation component).
+# ─────────────────────────────────────────────────────────
+
+def auxiliary_head_loss(v_t_pred: torch.Tensor,
+                         u_t:      torch.Tensor,
+                         mask:     torch.Tensor) -> torch.Tensor:
+    """
+    Masked MSE between predicted and target coordinates.
+    Used for both VAE (x0_pred vs x1) and score matching (eps_pred vs eps).
+
+    Args:
+        v_t_pred: (B, L, 3)  predicted quantity
+        u_t:      (B, L, 3)  target quantity
+        mask:     (B, L)     True for real residues
+
+    Returns:
+        scalar loss tensor
+    """
+    m = mask.float().unsqueeze(-1)   # (B, L, 1)
+    n = m.sum().clamp(min=1)
+    return ((v_t_pred - u_t) ** 2 * m).sum() / (n * 3)
+
+
+# ─────────────────────────────────────────────────────────
+# 8. COMBINED LOSS
 # ─────────────────────────────────────────────────────────
 
 class ConformerFlowLoss(nn.Module):
@@ -395,6 +421,8 @@ class ConformerFlowLoss(nn.Module):
             + λ_kl        * L_kl
             + λ_diversity * L_diversity
             + λ_geometry  * L_geometry
+            + λ_score(t)  * L_score_normalized   (multi-head only)
+            + λ_vae(t)    * L_vae                (multi-head only)
 
     Lambda weights are tunable — we start with equal weighting
     and can anneal them during training based on validation performance.
@@ -435,7 +463,14 @@ class ConformerFlowLoss(nn.Module):
                 mask:            torch.Tensor,
                 # Optional: full backbone for chirality check
                 backbone_coords: Optional[torch.Tensor] = None,
-                atom_mask:       Optional[torch.Tensor] = None) -> dict:
+                atom_mask:       Optional[torch.Tensor] = None,
+                # Multi-head auxiliary losses (passed by trainer when multi_head.enabled)
+                score_v_t_pred:  Optional[torch.Tensor] = None,
+                score_u_t:       Optional[torch.Tensor] = None,
+                vae_v_t_pred:    Optional[torch.Tensor] = None,
+                vae_u_t:         Optional[torch.Tensor] = None,
+                lambda_vae:      float = 0.0,
+                lambda_score:    float = 0.0) -> dict:
         """
         Args:
             v_R_pred:   (B, L, 3, 3)    predicted rotation velocity
@@ -465,6 +500,16 @@ class ConformerFlowLoss(nn.Module):
             chir_losses = chirality_loss(backbone_coords, atom_mask)
             chir_term   = chir_losses["chirality_loss"]
 
+        # ── Auxiliary head losses (multi-head mode) ──
+        score_loss_val = torch.tensor(0.0, device=mask.device)
+        vae_loss_val   = torch.tensor(0.0, device=mask.device)
+
+        if score_v_t_pred is not None and lambda_score > 0:
+            score_loss_val = auxiliary_head_loss(score_v_t_pred, score_u_t, mask)
+
+        if vae_v_t_pred is not None and lambda_vae > 0:
+            vae_loss_val = auxiliary_head_loss(vae_v_t_pred, vae_u_t, mask)
+
         # Weighted sum
         total = (
             self.lambda_flow      * flow_losses["flow_loss"]      +
@@ -472,7 +517,9 @@ class ConformerFlowLoss(nn.Module):
             self.lambda_kl        * kl_losses["kl_loss"]          +
             self.lambda_diversity * div_losses["diversity_loss"]   +
             self.lambda_geometry  * geom_losses["geometry_loss"]  +
-            self.lambda_chirality * chir_term
+            self.lambda_chirality * chir_term                      +
+            lambda_score          * score_loss_val                 +
+            lambda_vae            * vae_loss_val
         )
 
         return {
@@ -483,4 +530,6 @@ class ConformerFlowLoss(nn.Module):
             **div_losses,
             **geom_losses,
             **chir_losses,
+            "score_loss":  score_loss_val,
+            "vae_loss":    vae_loss_val,
         }

@@ -84,6 +84,63 @@ class WarmupCosineScheduler:
 
 
 # ─────────────────────────────────────────────────────────
+# LAMBDA ANNEALER
+# ─────────────────────────────────────────────────────────
+
+class LambdaAnnealer:
+    """
+    Manages annealed loss weights for multi-head training.
+
+    λ_vae   : 1.0 → 0.0 over anneal_epochs  (VAE warm-start fades out)
+    λ_score : 0.0 → 0.1 over anneal_epochs  (score matching fades in)
+    λ_flow  : constant 1.0                   (primary, always on)
+
+    Score matching loss is normalized by a running EMA of its raw value
+    so it remains at unit scale relative to the flow matching loss.
+    Normalization uses a one-step lag (previous step's EMA).
+    """
+
+    def __init__(self, cfg: dict):
+        mh = cfg.get("multi_head", {})
+        self.enabled        = mh.get("enabled",             False)
+        self._vae_start     = mh.get("lambda_vae_start",    1.0)
+        self._vae_end       = mh.get("lambda_vae_end",      0.0)
+        self._score_start   = mh.get("lambda_score_start",  0.0)
+        self._score_end     = mh.get("lambda_score_end",    0.1)
+        self._anneal_epochs = mh.get("anneal_epochs",       20)
+        self._ema_alpha     = mh.get("score_ema_alpha",     0.99)
+        self._score_ema: Optional[float] = None
+
+    def get_lambdas(self, epoch: int) -> dict:
+        if not self.enabled:
+            return {"lambda_vae": 0.0, "lambda_score": 0.0}
+        p  = min(epoch / max(self._anneal_epochs, 1), 1.0)
+        lv = self._vae_start   + p * (self._vae_end   - self._vae_start)
+        ls = self._score_start + p * (self._score_end - self._score_start)
+        return {"lambda_vae": max(lv, 0.0), "lambda_score": ls}
+
+    def update_score_ema(self, raw_loss: float):
+        """Call after each training step with the raw (un-normalized) score loss."""
+        if self._score_ema is None:
+            self._score_ema = max(raw_loss, 1e-8)
+        else:
+            self._score_ema = (self._ema_alpha * self._score_ema
+                               + (1 - self._ema_alpha) * raw_loss)
+
+    def normalized_score_lambda(self, raw_lambda: float) -> float:
+        """Return lambda / EMA so that lambda * L_score stays near unit scale."""
+        if self._score_ema is None or raw_lambda == 0.0:
+            return raw_lambda
+        return raw_lambda / max(self._score_ema, 1e-8)
+
+    def state_dict(self) -> dict:
+        return {"score_ema": self._score_ema}
+
+    def load_state_dict(self, d: dict):
+        self._score_ema = d.get("score_ema")
+
+
+# ─────────────────────────────────────────────────────────
 # TRAINER
 # ─────────────────────────────────────────────────────────
 
@@ -214,6 +271,10 @@ class Trainer:
         self.best_val_loss = float("inf")
         self.gen_type      = cfg["generative_model"]["type"]
 
+        # Multi-head annealer
+        self.annealer      = LambdaAnnealer(cfg)
+        self.current_epoch = 0
+
         # Dirs
         self.checkpoint_dir = Path(tcfg["checkpoint_dir"])
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -246,7 +307,9 @@ class Trainer:
         return {k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()}
 
-    def _compute_losses(self, out: dict) -> dict:
+    def _compute_losses(self, out: dict,
+                         lambda_vae: float = 0.0,
+                         lambda_score: float = 0.0) -> dict:
         """
         Compute all losses from a single forward pass output.
 
@@ -268,6 +331,12 @@ class Trainer:
             mask            = out["mask"],
             backbone_coords = out.get("target_coords"),
             atom_mask       = out.get("atom_mask"),
+            score_v_t_pred  = out.get("score_v_t_pred"),
+            score_u_t       = out.get("score_u_t"),
+            vae_v_t_pred    = out.get("vae_v_t_pred"),
+            vae_u_t         = out.get("vae_u_t"),
+            lambda_vae      = lambda_vae,
+            lambda_score    = lambda_score,
         )
 
     def _monitor_gradients(self) -> dict:
@@ -330,7 +399,15 @@ class Trainer:
         # Use correct dtype: bfloat16 for A100/H100/B200, float16 for consumer GPUs
         with autocast("cuda", enabled=self.use_amp, dtype=self.amp_dtype):
             out    = self.model(batch, n_gen=tcfg.get("n_gen_conformers", 10))
-            losses = self._compute_losses(out)
+            lambdas = self.annealer.get_lambdas(self.current_epoch)
+            eff_score_lambda = self.annealer.normalized_score_lambda(
+                lambdas["lambda_score"]
+            )
+            losses = self._compute_losses(
+                out,
+                lambda_vae   = lambdas["lambda_vae"],
+                lambda_score = eff_score_lambda,
+            )
 
         grad_stats = {}
         # bf16 doesn't need scaler.scale() — it never underflows
@@ -359,6 +436,13 @@ class Trainer:
         result = {k: v.item() if isinstance(v, torch.Tensor) and v.numel() == 1
                   else v for k, v in losses.items()}
         result.update(grad_stats)
+
+        # Update score EMA for normalization on the next step
+        if self.annealer.enabled:
+            raw_score = result.get("score_loss", 0.0)
+            if isinstance(raw_score, (int, float)) and raw_score > 0:
+                self.annealer.update_score_ema(raw_score)
+
         return result
 
     def _update_ema(self):
@@ -403,14 +487,20 @@ class Trainer:
         if not self.is_main:
             return
         lcfg = self.cfg["logging"]
-        keys = ["total_loss","flow_loss","ensemble_loss",
-                "kl_loss","diversity_loss","geometry_loss"]
+        keys = ["total_loss", "flow_loss", "ensemble_loss",
+                "kl_loss", "diversity_loss", "geometry_loss",
+                "score_loss", "vae_loss"]
         msg  = " | ".join(f"{k.replace('_loss','')}:{losses.get(k,0):.4f}"
                            for k in keys if k in losses)
         # Append diversity diagnostics when available
         if "mean_pairwise_rmsd" in losses:
             msg += f" | prmsd:{losses['mean_pairwise_rmsd']:.2f}Å"
         logger.info(f"[{phase}] step {self.global_step:6d} | {msg}")
+
+        if self.annealer.enabled and phase == "train":
+            lambdas = self.annealer.get_lambdas(self.current_epoch)
+            msg += (f" | λ_vae:{lambdas['lambda_vae']:.3f}"
+                    f" λ_score:{lambdas['lambda_score']:.3f}")
 
         if self.use_wandb:
             log_d = {f"{phase}/{k}": v for k, v in losses.items()
@@ -436,6 +526,8 @@ class Trainer:
             "scheduler_step":self.scheduler._step,
             "best_val_loss": self.best_val_loss,
             "config":        self.cfg,
+            "annealer":      self.annealer.state_dict(),
+            "current_epoch": self.current_epoch,
         }
         path = self.checkpoint_dir / f"ckpt_{tag}.pt"
         torch.save(ckpt, str(path))
@@ -450,6 +542,9 @@ class Trainer:
         self.best_val_loss   = ckpt.get("best_val_loss", float("inf"))
         if "ema_params" in ckpt:
             self.ema_params  = ckpt["ema_params"]
+        if "annealer" in ckpt:
+            self.annealer.load_state_dict(ckpt["annealer"])
+        self.current_epoch = ckpt.get("current_epoch", 0)
         logger.info(f"Resumed from {path} at step {self.global_step}")
 
     @torch.no_grad()
@@ -504,11 +599,13 @@ class Trainer:
                 f"batch={tcfg['batch_size']}  "
                 f"struct={self.cfg['representation']['structure']}  "
                 f"gen={self.cfg['generative_model']['type']}  "
+                f"multi_head={self.cfg.get('multi_head', {}).get('enabled', False)}  "
                 f"bf16={tcfg.get('use_bf16', False)}"
             )
 
         try:
             for epoch in range(tcfg["max_epochs"]):
+                self.current_epoch = epoch
                 # Set epoch for DistributedSampler (ensures different shuffle each epoch)
                 if self.multi_gpu and self.world_size > 1:
                     dist_sampler.set_epoch(epoch)
