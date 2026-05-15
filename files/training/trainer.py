@@ -657,6 +657,22 @@ class Trainer:
                     batch = self._to_device(batch)
                     try:
                         losses = self._train_step(batch)
+                    except RuntimeError as e:
+                        if "out of memory" in str(e).lower():
+                            logger.warning(
+                                f"[rank {self.local_rank}] "
+                                f"Step {self.global_step} OOM — clearing cache and skipping batch"
+                            )
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            self.optimizer.zero_grad(set_to_none=True)
+                        else:
+                            logger.warning(
+                                f"[rank {self.local_rank}] "
+                                f"Step {self.global_step} failed: {e} — skipping"
+                            )
+                        self.global_step += 1
+                        continue
                     except Exception as e:
                         logger.warning(
                             f"[rank {self.local_rank}] "
