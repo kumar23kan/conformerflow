@@ -30,10 +30,11 @@ Input PDB (X-ray)
 └──────┬───────────┘
        │
        ▼
-┌────────────────────┐
-│   Flow Matching    │  ODE on SE(3) frames: noise → conformer
-│   (SE(3) frames)   │
-└──────┬─────────────┘
+┌────────────────────────────────────────────────────┐
+│   Generative Model                                 │
+│   flow_matching  ot_cfm  ddpm  ddim  vae  score    │
+│   (configurable — only flow_matching uses SE(3))   │
+└──────┬─────────────────────────────────────────────┘
        │
        ▼
 Output: N conformer CA coordinate arrays  (N, L, 3)
@@ -157,36 +158,116 @@ The latent space has dimension `d_latent = 16`, chosen to match the ~10–20 slo
 
 ---
 
-## Stage 5 — Flow Matching on SE(3)
+## Stage 5 — Generative Model
 
-The generative model (`flow_matching.py`) learns a time-dependent vector field that continuously deforms random noise frames into protein conformer frames.
+Six generative model backends are available, selected via `generative_model.type` in the config. They all share the same interface (`training_step` / `generate`) and feed into the same loss functions.
 
-### Training
+**Key distinction**: only `flow_matching` operates on full SE(3) frames (rotations + translations). All other backends work on Cα coordinates directly and are not SE(3)-equivariant.
 
-For each training step:
-1. Sample a random time `t ∈ [0, 1]`
-2. Sample random starting frames `x_0` (Gaussian noise)
+---
+
+### `flow_matching` (default)
+
+Learns a time-dependent vector field that continuously deforms random SE(3) noise frames into protein conformer frames (`flow_matching.py`).
+
+**Training** — for each step:
+1. Sample `t ∈ [0, 1]` uniformly
+2. Sample random starting frames `x_0` (Gaussian noise on SE(3))
 3. Sample a target conformer `x_1` from the NMR ensemble
 4. Interpolate: `x_t = (1 - t) * x_0 + t * x_1`
-5. Define target velocity: `u_t = x_1 - (1 - σ_min) * x_0`
+5. Target velocity: `u_t = x_1 - (1 - σ_min) * x_0`
 6. Train the network to predict `u_t` from `(x_t, t, θ)`
 
-The small constant `σ_min = 0.01` keeps a residual noise contribution so the trajectory never collapses to a deterministic point, preserving diversity in generation.
+`σ_min = 0.01` keeps residual noise so the trajectory never collapses to a deterministic point, preserving output diversity.
 
-Loss is the geodesic distance between predicted and target frames — Frobenius norm of the rotation error plus MSE of the translation.
+**Inference** — integrate the ODE from `t = 0` to `t = 1`:
+- **Heun (2nd-order)**: default, 20 steps ≈ 40 Euler steps in quality
+- **Euler (1st-order)**: simpler, needs 100+ steps for equivalent quality
 
-### Inference (ODE Integration)
+Repeat with independent noise samples to generate N conformers.
 
-To generate a new conformer:
-1. Sample random SE(3) frames `x_0 ~ N(0, I)` (one frame per residue)
-2. Numerically integrate the learned ODE from `t = 0` to `t = 1` using the trained vector field `v_θ(x_t, t, θ)`
-3. Extract Cα positions from the final frames
+---
 
-Two integrators are available:
-- **Heun (2nd-order)** — default, 20 steps, equivalent accuracy to ~40 Euler steps
-- **Euler (1st-order)** — simpler, requires 100+ steps for equivalent quality
+### `ot_cfm` — Optimal Transport CFM
 
-Repeat from step 1 with independent noise samples to generate N conformers.
+Same flow matching training objective, but before computing the interpolation, noise–data pairs within each mini-batch are matched using the **linear assignment algorithm** (`scipy.optimize.linear_sum_assignment`) to minimise total squared Cα distance. This reduces gradient variance compared to random pairing.
+
+- Coordinate-based (not SE(3)-equivariant)
+- Falls back to random matching if `scipy` is unavailable
+- Inference is identical to `flow_matching` (Euler or Heun ODE)
+- Best when training is unstable due to high variance gradients
+
+---
+
+### `ddpm` — Denoising Diffusion Probabilistic Model
+
+Classical DDPM on Cα coordinates with a **cosine noise schedule**.
+
+**Training**: sample a random integer timestep `s ∈ [0, T]`, corrupt coordinates with `x_s = √ᾱ_s · x_1 + √(1 - ᾱ_s) · ε`, train the network to predict the noise `ε`.
+
+**Inference**: stochastic reverse diffusion over `T` steps (sub-sampled to `n_steps` via striding). Each step re-adds a small amount of noise, so generation is stochastic — two runs with different seeds give different conformers.
+
+- `T = 1000` steps by default; `n_steps` controls how many are actually run via striding
+- Coordinates are clamped to `[-5, 5]` during reverse diffusion for stability
+- Highest quality but slowest inference among the diffusion-based options
+
+---
+
+### `ddim` — Denoising Diffusion Implicit Models
+
+Shares **identical training** with DDPM (same `_DenoisingTransformer`, same noise prediction objective), but uses **deterministic inference** (η = 0):
+
+```
+x_{s-1} = √ᾱ_{s-1} · x̂_0 + √(1 - ᾱ_{s-1}) · ε_θ(x_s)
+```
+
+No noise is added at each step, so the trajectory is fully deterministic given the starting noise `x_T`. Enables high-quality generation in far fewer steps than DDPM (typically 20–50 vs. 1000).
+
+- Diversity still comes from sampling different `x_T ~ N(0, I)` for each conformer
+- Drop-in replacement for DDPM at inference — uses the same checkpoint
+
+---
+
+### `vae` — Variational Auto-Encoder
+
+Direct single-pass decoder: `(θ, z) → x_0`. No iterative denoising.
+
+**Training**: `x_0_pred = decoder(θ, z)`, loss is reconstruction MSE against `x_1` (ground-truth Cα). `t_flow` is fixed to 1 so the schedule factor in `losses.py` is neutral.
+
+**Inference**: one forward pass per conformer — fastest generator by a wide margin. `n_steps` and `method` are ignored.
+
+- Diversity comes entirely from sampling different `z ~ N(0, I)` values
+- Quality is generally lower than flow/diffusion models but generation is O(1) in steps
+
+---
+
+### `score_matching` — Score-Based Model
+
+Implements the score matching framework (Song & Ermon, 2020) with a **geometric noise schedule**: `σ(t) = σ_min · (σ_max / σ_min)^t`, where `σ_min = 0.01` and `σ_max = 50.0`.
+
+**Training**: corrupt `x_t = x_1 + σ(t) · ε`, train network to predict the noise `ε` (equivalent to learning the score `s_θ ≈ -ε/σ`).
+
+**Inference**: Euler-Maruyama SDE stepping from high noise (`σ_max · N(0, I)`) down to clean coordinates. Each step:
+```
+dx = -σ² · score · dt
+xt = xt + dx + √(σ² - σ_prev²) · noise
+```
+
+- Stochastic inference (adds noise at each step like DDPM)
+- Geometric schedule means noise levels span several orders of magnitude, which can capture both large-scale and fine-grained flexibility
+
+---
+
+### Generative Model Comparison
+
+| Type | SE(3)-equivariant | Inference style | Steps needed | Relative speed |
+|------|-------------------|-----------------|--------------|----------------|
+| `flow_matching` | Yes | ODE (deterministic) | 20 (Heun) | Fast |
+| `ot_cfm` | No | ODE (deterministic) | 20 (Heun) | Fast |
+| `ddpm` | No | SDE (stochastic) | 1000 (strided) | Slow |
+| `ddim` | No | ODE (deterministic) | 20–50 | Fast |
+| `vae` | No | Single pass | 1 | Fastest |
+| `score_matching` | No | SDE (stochastic) | 100+ | Medium |
 
 ---
 
