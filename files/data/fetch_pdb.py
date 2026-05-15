@@ -431,6 +431,11 @@ def run_fetch_pipeline(output_dir: str,
 # CLI
 # ──────────────────────────────────────────────
 
+# Aliases for notebook compatibility
+fetch_nmr_ids = query_nmr_entries
+download_pdbs = batch_download
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ConformerFlow — PDB Data Fetcher")
     parser.add_argument("--output_dir",     type=str, default="./pdb_data",
