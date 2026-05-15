@@ -148,24 +148,25 @@ class InvariantPointAttention(nn.Module):
         Vp = self.v_pt(h).view(N, L, H, P, 3)
 
         # Global frame: p_global = R^T @ p_local + t
-        # R has ROWS as frame axes, so local→global requires R^T.
-        # Einsum "nlji,nlhpj->nlhpi" contracts over j (input) using R[i,j] transposed
-        # = column i of R^T, which is row i of R → R^T @ pts.
         def to_global(pts, R, t):
             # pts: (N, L, H, P, 3), R: (N, L, 3, 3), t: (N, L, 3)
             g = torch.einsum("nlji,nlhpj->nlhpi", R, pts)   # R^T @ pts  (N, L, H, P, 3)
-            g = g + t[:, :, None, None, :]                   # broadcast t
+            g = g + t[:, :, None, None, :]
             return g
 
         Qg = to_global(Qp, R, t)   # (N, L, H, P, 3)
         Kg = to_global(Kp, R, t)
         Vg = to_global(Vp, R, t)
 
-        # Pairwise point distances: (N, H, L, L)
-        # Qg[i] - Kg[j] for all i,j
-        Qg_e = Qg.permute(0,2,1,3,4).unsqueeze(3)   # (N, H, L, 1, P, 3)
-        Kg_e = Kg.permute(0,2,1,3,4).unsqueeze(2)   # (N, H, 1, L, P, 3)
-        pt_d2 = ((Qg_e - Kg_e)**2).sum(dim=-1).sum(dim=-1)  # (N, H, L, L)
+        # ── Memory-efficient pairwise point distances: (N, H, L, L) ──
+        # Original code materialised (N, H, L, L, P, 3) ≈ 800 MB at L=512, P=4.
+        # Use ||Qi-Kj||² = ||Qi||² + ||Kj||² - 2·Qi·Kj; only (N,H,L,L) survives.
+        Qg_p = Qg.permute(0, 2, 1, 3, 4)             # (N, H, L, P, 3)
+        Kg_p = Kg.permute(0, 2, 1, 3, 4)
+        Qg_sq = (Qg_p ** 2).sum(dim=(-1, -2))         # (N, H, L)
+        Kg_sq = (Kg_p ** 2).sum(dim=(-1, -2))         # (N, H, L)
+        cross = torch.einsum("nhipd,nhjpd->nhij", Qg_p, Kg_p)  # (N, H, L, L)
+        pt_d2 = (Qg_sq.unsqueeze(-1) + Kg_sq.unsqueeze(-2) - 2 * cross).clamp(min=0)
 
         w_pt = F.softplus(self.log_pt_w).view(1, H, 1, 1)
         a_pt = -0.5 * w_pt * pt_d2                           # (N, H, L, L)
@@ -187,11 +188,11 @@ class InvariantPointAttention(nn.Module):
         out_s = torch.einsum("nhij,njhd->nihd", attn, V)   # (N, L, H, d)
         out_s = out_s.reshape(N, L, D)                      # (N, L, D)
 
-        # ── Aggregate point values in global frame ──
-        # Vg: (N, L, H, P, 3) → permute → (N, H, L, P, 3)
-        Vg_p  = Vg.permute(0, 2, 1, 3, 4)                  # (N, H, L, P, 3)
-        attn_e= attn.unsqueeze(-1).unsqueeze(-1)            # (N, H, L, L, 1, 1)
-        Vg_agg= (attn_e * Vg_p.unsqueeze(2)).sum(dim=3)    # (N, H, L, P, 3)
+        # ── Memory-efficient point value aggregation ──
+        # Original code materialised (N, H, L, L, P, 3) ≈ 800 MB at L=512.
+        # Use einsum to contract the j dimension without materialising L×L×P×3.
+        Vg_p  = Vg.permute(0, 2, 1, 3, 4)                           # (N, H, L, P, 3)
+        Vg_agg = torch.einsum("nhij,nhjpd->nhipd", attn, Vg_p)      # (N, H, L, P, 3)
 
         # Bring to local frame: p_local = R @ (p_global - t)
         # R has rows as axes → to_local = R @ (p - t).
