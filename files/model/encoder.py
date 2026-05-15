@@ -289,9 +289,13 @@ class StructureEncoder(nn.Module):
         # Combine sequence + geometry
         h = self.input_proj(torch.cat([seq_feat_f, geo["node_geom"]], dim=-1))
 
-        # IPA layers
+        # IPA layers — gradient checkpointing avoids storing per-layer attention
+        # maps (N,H,L,L) for backward; recomputes them instead (~30% more compute,
+        # but activation memory scales as O(1 layer) instead of O(n_layers)).
+        from torch.utils.checkpoint import checkpoint
         for layer in self.layers:
-            h = layer(h, R, t, rel_frames, seq_mask_f)
+            h = checkpoint(layer, h, R, t, rel_frames, seq_mask_f,
+                           use_reentrant=False)
 
         h = self.final_norm(h)
         return rearrange(h, "(b m) l d -> b m l d", b=B, m=M)

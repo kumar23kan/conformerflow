@@ -51,9 +51,19 @@ class NMREnsembleDataset(Dataset):
         self.augment        = augment
 
         with open(manifest_path) as f:
-            self.manifest = json.load(f)
+            raw = json.load(f)
 
-        logger.info(f"NMREnsembleDataset: {len(self.manifest)} entries from {manifest_path}")
+        # Filter to entries whose .npz files actually exist on disk.
+        # Returning zeros for missing files gives garbage training signal and
+        # pads to max_residues, which can OOM when real proteins are shorter.
+        self.manifest = [e for e in raw if Path(e["npz_path"]).exists()]
+        n_missing = len(raw) - len(self.manifest)
+        if n_missing:
+            logger.warning(
+                f"NMREnsembleDataset: skipped {n_missing}/{len(raw)} entries "
+                f"whose .npz files are missing ({manifest_path})"
+            )
+        logger.info(f"NMREnsembleDataset: {len(self.manifest)} usable entries from {manifest_path}")
 
     def __len__(self):
         return len(self.manifest)
