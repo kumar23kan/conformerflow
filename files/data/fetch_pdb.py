@@ -48,15 +48,15 @@ def _make_terminal(node_id: int, attribute: str, operator: str, value) -> dict:
 def query_nmr_entries(min_conformers: int = 5, max_results: int = 20000) -> list:
     """
     Query RCSB for NMR structures with at least min_conformers models.
-    Filters: SOLUTION NMR, protein, minimum conformer count.
+    Filters: SOLUTION NMR, protein only.
+    Conformer-count filtering is done during parsing (pdbx_nmr_ensemble
+    attributes are not searchable via the RCSB text service).
     Paginates automatically if max_results > RCSB_PAGE_SIZE.
     """
     query_nodes = [
         _make_terminal(0, "exptl.method", "exact_match", "SOLUTION NMR"),
         _make_terminal(1, "rcsb_entry_info.polymer_entity_count_protein",
                        "greater_or_equal", 1),
-        _make_terminal(2, "pdbx_nmr_ensemble.conformers_submitted_total_number",
-                       "greater_or_equal", min_conformers),
     ]
     return _paginated_search(query_nodes, max_results)
 
