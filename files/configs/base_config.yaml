@@ -1,6 +1,13 @@
 # ConformerFlow — base configuration
 # All values can be overridden by CLI flags in train.py
 
+# ── Training mode (single entry point) ───────────────────
+# Single-head options (one generative model):
+#   flow_matching | ot_cfm | ddpm | ddim | vae | score_matching
+# Multi-head option (VAE + score_matching + flow_matching simultaneously):
+#   multi_head
+training_mode: flow_matching
+
 representation:
   structure: se3_frames   # se3_frames | cartesian | distance_matrix | torsion_angles
   sequence:  onehot       # onehot | esm2_650m | esm2_3b | prot_t5 | none
@@ -16,7 +23,7 @@ model:
   dropout:          0.1
 
 generative_model:
-  type:              flow_matching   # flow_matching | ot_cfm | ddpm | ddim | vae | score_matching
+  type:              flow_matching   # set automatically from training_mode — do not edit directly
   sigma_min:         0.01
   ode_method:        heun            # heun | euler | rk4
   n_inference_steps: 20
@@ -64,7 +71,7 @@ data:
   max_workers:  4
 
 multi_head:
-  enabled:             false   # true to activate VAE + score_matching auxiliary heads
+  enabled:             false   # set automatically from training_mode — do not edit directly
   lambda_vae_start:    1.0     # VAE weight at epoch 0
   lambda_vae_end:      0.0     # VAE weight after anneal_epochs
   lambda_score_start:  0.0     # score weight at epoch 0

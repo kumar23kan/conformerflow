@@ -84,6 +84,44 @@ class WarmupCosineScheduler:
 
 
 # ─────────────────────────────────────────────────────────
+# TRAINING MODE RESOLVER
+# ─────────────────────────────────────────────────────────
+
+_SINGLE_HEAD_MODES = {
+    "flow_matching", "ot_cfm", "ddpm", "ddim", "vae", "score_matching"
+}
+
+def resolve_training_mode(cfg: dict) -> dict:
+    """
+    Reads cfg["training_mode"] and sets cfg["generative_model"]["type"]
+    and cfg["multi_head"]["enabled"] accordingly.
+
+    Single-head:  training_mode = flow_matching | ot_cfm | ddpm | ddim | vae | score_matching
+    Multi-head:   training_mode = multi_head
+
+    This is the single entry point — users set training_mode only.
+    generative_model.type and multi_head.enabled are managed here.
+    """
+    mode = cfg.get("training_mode", "flow_matching")
+
+    if mode == "multi_head":
+        cfg.setdefault("multi_head", {})["enabled"] = True
+        cfg.setdefault("generative_model", {})["type"] = "flow_matching"
+        logger.info("Training mode: multi_head "
+                    "(VAE + score_matching auxiliary heads + flow_matching primary)")
+    elif mode in _SINGLE_HEAD_MODES:
+        cfg.setdefault("multi_head", {})["enabled"] = False
+        cfg.setdefault("generative_model", {})["type"] = mode
+        logger.info(f"Training mode: {mode} (single-head)")
+    else:
+        raise ValueError(
+            f"Unknown training_mode '{mode}'. "
+            f"Choose from: {sorted(_SINGLE_HEAD_MODES | {'multi_head'})}"
+        )
+    return cfg
+
+
+# ─────────────────────────────────────────────────────────
 # LAMBDA ANNEALER
 # ─────────────────────────────────────────────────────────
 
@@ -163,6 +201,8 @@ class Trainer:
     """
 
     def __init__(self, cfg: dict):
+        # Resolve training_mode → generative_model.type + multi_head.enabled
+        resolve_training_mode(cfg)
         self.cfg = cfg
         tcfg     = cfg["training"]
 
