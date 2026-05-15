@@ -159,14 +159,19 @@ class InvariantPointAttention(nn.Module):
         Vg = to_global(Vp, R, t)
 
         # ── Memory-efficient pairwise point distances: (N, H, L, L) ──
-        # Original code materialised (N, H, L, L, P, 3) ≈ 800 MB at L=512, P=4.
-        # Use ||Qi-Kj||² = ||Qi||² + ||Kj||² - 2·Qi·Kj; only (N,H,L,L) survives.
-        Qg_p = Qg.permute(0, 2, 1, 3, 4)             # (N, H, L, P, 3)
+        # Use ||Qi-Kj||² = ||Qi||² + ||Kj||² - 2·Qi·Kj.
+        # Cross term via bmm on (N*H, L, P*3) — guaranteed not to materialise
+        # the (N, H, L, L, P, 3) intermediate that the original broadcast created.
+        Qg_p = Qg.permute(0, 2, 1, 3, 4)                       # (N, H, L, P, 3)
         Kg_p = Kg.permute(0, 2, 1, 3, 4)
-        Qg_sq = (Qg_p ** 2).sum(dim=(-1, -2))         # (N, H, L)
-        Kg_sq = (Kg_p ** 2).sum(dim=(-1, -2))         # (N, H, L)
-        cross = torch.einsum("nhipd,nhjpd->nhij", Qg_p, Kg_p)  # (N, H, L, L)
-        pt_d2 = (Qg_sq.unsqueeze(-1) + Kg_sq.unsqueeze(-2) - 2 * cross).clamp(min=0)
+        NH   = N * H
+        Qg_flat = Qg_p.reshape(NH, L, P * 3)                    # (N*H, L, P*3)
+        Kg_flat = Kg_p.reshape(NH, L, P * 3)
+        Qg_sq   = (Qg_flat ** 2).sum(dim=-1)                    # (N*H, L)
+        Kg_sq   = (Kg_flat ** 2).sum(dim=-1)                    # (N*H, L)
+        cross   = torch.bmm(Qg_flat, Kg_flat.transpose(-1, -2)) # (N*H, L, L)
+        pt_d2   = (Qg_sq.unsqueeze(-1) + Kg_sq.unsqueeze(-2) - 2 * cross
+                   ).clamp(min=0).reshape(N, H, L, L)
 
         w_pt = F.softplus(self.log_pt_w).view(1, H, 1, 1)
         a_pt = -0.5 * w_pt * pt_d2                           # (N, H, L, L)
@@ -189,10 +194,11 @@ class InvariantPointAttention(nn.Module):
         out_s = out_s.reshape(N, L, D)                      # (N, L, D)
 
         # ── Memory-efficient point value aggregation ──
-        # Original code materialised (N, H, L, L, P, 3) ≈ 800 MB at L=512.
-        # Use einsum to contract the j dimension without materialising L×L×P×3.
-        Vg_p  = Vg.permute(0, 2, 1, 3, 4)                           # (N, H, L, P, 3)
-        Vg_agg = torch.einsum("nhij,nhjpd->nhipd", attn, Vg_p)      # (N, H, L, P, 3)
+        # Use bmm on (N*H, L, P*3) — same guarantee as the distance computation.
+        Vg_p    = Vg.permute(0, 2, 1, 3, 4)                         # (N, H, L, P, 3)
+        Vg_flat = Vg_p.reshape(NH, L, P * 3)                         # (N*H, L, P*3)
+        Vg_agg  = torch.bmm(attn.reshape(NH, L, L), Vg_flat
+                            ).reshape(N, H, L, P, 3)                  # (N, H, L, P, 3)
 
         # Bring to local frame: p_local = R @ (p_global - t)
         # R has rows as axes → to_local = R @ (p - t).

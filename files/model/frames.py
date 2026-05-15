@@ -269,7 +269,10 @@ class BackboneFrameModule(nn.Module):
         rel_frames = relative_frame_encoding(R, t)
 
         # Per-residue node geometry: CB dir (3) + mean distance profile (K)
+        # mean over j then immediately discard dist_rbf — (N,L,L,K) is ~268 MB
+        # at N=8,L=512 and has no other use after this line.
         mean_dist_profile = dist_rbf.mean(dim=-2)          # (N, L, K)
+        del dist_rbf                                        # free (N,L,L,K) immediately
         node_geom = torch.cat([cb_dir, mean_dist_profile], dim=-1)  # (N, L, 3+K)
         node_geom = self.geom_proj(node_geom)              # (N, L, d_model)
 
@@ -277,8 +280,6 @@ class BackboneFrameModule(nn.Module):
             "R":          R,
             "t":          t,
             "frame_mask": frame_mask,
-            "cb_dir":     cb_dir,
-            "dist_rbf":   dist_rbf,
             "rel_frames": rel_frames,
             "node_geom":  node_geom,
         }
