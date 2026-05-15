@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Data — large binary files not tracked in git
+pdb_data/
+*.npz
+*.pdb
+*.cif
+*.fasta
+
+# Checkpoints — too large for git
+checkpoints/
+*.pt
+*.ckpt
+*.safetensors
+
+# Logs and outputs
+*.log
+wandb/
+validation_results/
+runs/
+
+# Temporary files
+*.tmp
+*.tsv
+mmseqs_tmp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb

@@ -1,0 +1,64 @@
+# ConformerFlow — base configuration
+# All values can be overridden by CLI flags in train.py
+
+representation:
+  structure: se3_frames   # se3_frames (only implemented option)
+  sequence:  onehot       # onehot | esm2_650m | esm2_3b | prot_t5 | none
+
+model:
+  d_model:          256
+  d_latent:         16
+  n_encoder_layers: 4
+  n_flow_layers:    8
+  n_heads:          8
+  n_points:         4
+  d_ff:             512
+  dropout:          0.1
+
+generative_model:
+  type:              flow_matching   # flow_matching (only implemented option)
+  sigma_min:         0.01
+  ode_method:        heun            # heun | euler | rk4
+  n_inference_steps: 20
+
+ensemble_stats:
+  covariance:  full_covariance   # full_covariance | diagonal | pca_topk | attention
+  free_bits:   0.5
+  n_pca_modes: 10
+
+training:
+  batch_size:       4
+  max_epochs:       100
+  learning_rate:    0.0001
+  weight_decay:     0.0001
+  warmup_steps:     1000
+  lr_decay_steps:   100000
+  checkpoint_dir:   checkpoints
+  n_gen_conformers: 10
+  val_every:        500
+  save_every:       2000
+  max_grad_norm:    1.0
+  loss_schedule:    fixed
+  multi_gpu:        false
+  use_bf16:         false
+  seed:             42
+
+loss:
+  lambda_flow:      1.0
+  lambda_ensemble:  1.0
+  lambda_kl:        0.01
+  lambda_diversity: 0.5
+  lambda_geometry:  0.1
+  lambda_chirality: 0.1
+  min_spread:       0.5
+
+logging:
+  use_wandb:    false
+  run_name:     conformerflow_run1
+  log_every:    50
+  project_name: conformerflow
+
+data:
+  max_residues: 800
+  pdb_data_dir: pdb_data
+  max_workers:  4

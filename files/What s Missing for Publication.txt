@@ -1,0 +1,74 @@
+What's Missing for Publication
+  
+  Data quality — biggest gap
+
+  - No sequence redundancy removal. You need MMseqs2 clustering at 30% identity between train and test. Without it, the model memorises seen folds and evaluation metrics are inflated. This is the single
+  most important thing.
+  - No temporal split. Structures deposited after a cutoff date (e.g. 2020-01-01) should be the test set, replicating real prospective use. Random splits are not accepted by reviewers for structural
+  biology models.
+  - No outlier conformer detection. Individual NMR models can be misfolded artifacts. Need per-conformer RMSD vs ensemble mean; remove conformers more than 2 standard deviations away.
+  - No missing backbone atom handling. Some NMR conformers have missing N, CA, or C atoms mid-chain. Currently this would silently corrupt the mask or produce zero coordinates. Need explicit per-atom
+  completeness check with residue exclusion.
+  - Chain selection not specified. Multi-chain NMR structures — which chain? First? Longest? Lowest BMRB shift violations? Currently undefined.
+
+  Metrics — reviewers will ask for all of these
+
+  - Ensemble RMSD coverage — for each NMR conformer, what fraction has at least one generated conformer within 2 Å RMSD? This is the primary metric in EigenFold, FoldFlow, Str2Str.
+  - RMSF Pearson r — per-residue root mean square fluctuation between generated and NMR ensemble. Your metrics.py has this but it needs to be reported with error bars (bootstrap over proteins).
+  - Ramachandran allowed percentage — what fraction of φ/ψ angles land in allowed regions? Physical validity check. Currently zero validation of this.
+  - Clash score — number of severe atomic overlaps per 1000 atoms (PHENIX MolProbity definition). Generated conformers at 5 epochs have ~20 Å CA-CA distances, so this would be catastrophic right now.
+  - Covariance similarity (Frobenius norm) — already in metrics.py, good.
+  - Diversity vs accuracy tradeoff curve — vary the number of generated conformers N and plot coverage vs. self-diversity. This shows whether the model is just generating noise or actual functional
+  diversity.
+
+  Baselines — what you'd compare against
+
+  - EigenFold (Jing et al. 2023) — diffusion on PCA eigenvectors of NMR covariance
+  - Str2Str (Lu et al. 2023) — flow matching on backbone frames, same task
+  - FoldFlow (Stark et al. 2023) — SE(3) flow matching, trained on PDB
+  - MD simulation (GROMACS/AMBER, 100 ns) — gold standard for flexibility, expensive
+  - AlphaFold2 B-factors as a trivial flexibility predictor — should clearly beat this
+  - Trivial baseline: sample conformers by adding Gaussian noise scaled to local B-factor. Surprisingly hard to beat.
+
+  Model correctness — things that can silently produce wrong results
+
+  - Equivariance is not numerically verified. You need a test: rotate the input by a random SO(3) matrix, check that the output rotates by the same matrix. Currently assumed but untested. If the IPA or
+  frame building has a subtle bug, the whole equivariance claim fails.
+  - No EMA (exponential moving average) of weights. Diffusion and flow matching papers universally use EMA for inference — the training weights oscillate too much. Without EMA, inference quality is
+  systematically worse than what the paper would report.
+  - The latent is per-residue (B, L, d_latent), not global. This is unusual. Standard VAE-style conformer generators use a global latent z ∈ ℝ^d. Per-residue latents of dimension 32×L can total thousands
+  of dimensions, making KL regularization extremely hard — the model will either ignore the latent entirely (posterior collapse) or overfit to it. This needs a design decision: global vs. per-residue, and
+  justification.
+  - Diversity loss is zero in every epoch. This appeared in training. Likely because the min_spread threshold is never met with an undertrained model, or because the loss is computed on generated
+  conformers that are all identical (mode collapse early in training). Needs investigation.
+  - Chirality loss for non-SE(3) encoders. Cartesian and distance matrix encoders lose chirality information — they cannot distinguish L from D amino acids. A model trained without chirality supervision
+  can generate mirror-image proteins. Needs either a chirality loss or explicit verification.
+
+  Training infrastructure
+
+  - No random seed control. Results not reproducible run-to-run. Need torch.manual_seed, numpy.random.seed, and DataLoader worker_init_fn.
+  - No gradient monitoring per component. If the flow loss gradient is 1000× the geometry gradient, one dominates. Should log per-component gradient norms separately.
+  - No learning rate schedule plot. Warmup + cosine decay is standard but needs to be verified it's actually doing what's expected.
+  - No hyperparameter sensitivity study. What happens if you change lambda_kl from 0.01 to 0.1? Publication reviewers expect ablations on every loss weight.
+
+  Physical validity pipeline (currently absent)
+
+  After generation, every paper runs the output through:
+  1. OpenMM or Rosetta FastRelax — energy minimization to fix bad bond lengths/angles from the model
+  2. MolProbity — Ramachandran, rotamer, clash score
+  3. DSSP — secondary structure assignment to verify generated conformers have realistic secondary structure
+  Without at least the MolProbity step, no structural biology journal will accept it.
+
+  The diversity_loss = 0.0 problem
+
+  This is the most pressing model issue. If all generated conformers are identical, the model has no utility. The diversity loss needs to be checked: either the loss function itself is broken, the
+  threshold min_spread is too high for an early-stage model, or the generated conformers are actually all identical (mode collapse). This needs to be diagnosed before publication.
+
+  ---
+  Priority order if you had to pick 5 things:
+  1. Sequence redundancy removal (MMseqs2)
+  2. EMA for inference weights
+  3. Equivariance numerical test
+  4. Diagnose and fix diversity loss = 0
+  5. Ramachandran + clash score evaluation on generated structures
+
