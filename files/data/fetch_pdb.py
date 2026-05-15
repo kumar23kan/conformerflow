@@ -30,6 +30,21 @@ RCSB_DOWNLOAD    = "https://files.rcsb.org/download"
 RCSB_PAGE_SIZE = 10000   # RCSB v2 hard cap per request
 
 
+def _make_terminal(node_id: int, attribute: str, operator: str, value) -> dict:
+    """Build a single RCSB v2 terminal search node with all required fields."""
+    return {
+        "type":       "terminal",
+        "node_id":    node_id,
+        "service":    "text",
+        "parameters": {
+            "attribute": attribute,
+            "operator":  operator,
+            "negation":  False,
+            "value":     value,
+        },
+    }
+
+
 def query_nmr_entries(min_conformers: int = 5, max_results: int = 20000) -> list:
     """
     Query RCSB for NMR structures with at least min_conformers models.
@@ -37,33 +52,11 @@ def query_nmr_entries(min_conformers: int = 5, max_results: int = 20000) -> list
     Paginates automatically if max_results > RCSB_PAGE_SIZE.
     """
     query_nodes = [
-        {
-            "type": "terminal",
-            "service": "text",
-            "parameters": {
-                "attribute": "exptl.method",
-                "operator":  "exact_match",
-                "value":     "SOLUTION NMR",
-            }
-        },
-        {
-            "type": "terminal",
-            "service": "text",
-            "parameters": {
-                "attribute": "rcsb_entry_info.polymer_entity_count_protein",
-                "operator":  "greater_or_equal",
-                "value":     1,
-            }
-        },
-        {
-            "type": "terminal",
-            "service": "text",
-            "parameters": {
-                "attribute": "pdbx_nmr_ensemble.conformers_submitted_total_number",
-                "operator":  "greater_or_equal",
-                "value":     min_conformers,
-            }
-        },
+        _make_terminal(0, "exptl.method", "exact_match", "SOLUTION NMR"),
+        _make_terminal(1, "rcsb_entry_info.polymer_entity_count_protein",
+                       "greater_or_equal", 1),
+        _make_terminal(2, "pdbx_nmr_ensemble.conformers_submitted_total_number",
+                       "greater_or_equal", min_conformers),
     ]
     return _paginated_search(query_nodes, max_results)
 
@@ -75,33 +68,10 @@ def query_xray_entries(max_results: int = 5000) -> list:
     Paginates automatically if max_results > RCSB_PAGE_SIZE.
     """
     query_nodes = [
-        {
-            "type": "terminal",
-            "service": "text",
-            "parameters": {
-                "attribute": "exptl.method",
-                "operator":  "exact_match",
-                "value":     "X-RAY DIFFRACTION",
-            }
-        },
-        {
-            "type": "terminal",
-            "service": "text",
-            "parameters": {
-                "attribute": "rcsb_entry_info.polymer_entity_count_protein",
-                "operator":  "greater_or_equal",
-                "value":     1,
-            }
-        },
-        {
-            "type": "terminal",
-            "service": "text",
-            "parameters": {
-                "attribute": "refine.ls_d_res_high",
-                "operator":  "less_or_equal",
-                "value":     2.5,
-            }
-        },
+        _make_terminal(0, "exptl.method", "exact_match", "X-RAY DIFFRACTION"),
+        _make_terminal(1, "rcsb_entry_info.polymer_entity_count_protein",
+                       "greater_or_equal", 1),
+        _make_terminal(2, "refine.ls_d_res_high", "less_or_equal", 2.5),
     ]
     return _paginated_search(query_nodes, max_results)
 
@@ -112,12 +82,15 @@ def _build_query(nodes: list, start: int, rows: int) -> dict:
         "query": {
             "type":             "group",
             "logical_operator": "and",
+            "label":            "text",
             "nodes":            nodes,
         },
         "return_type": "entry",
         "request_options": {
-            "paginate": {"start": start, "rows": rows},
-            "sort":     [{"sort_by": "score", "direction": "desc"}],
+            "paginate":              {"start": start, "rows": rows},
+            "results_content_type":  ["experimental"],
+            "sort":                  [{"sort_by": "score", "direction": "desc"}],
+            "scoring_strategy":      "combined",
         },
     }
 
@@ -137,6 +110,10 @@ def _execute_search(query: dict, retries: int = 3) -> list:
         except requests.exceptions.HTTPError as e:
             if resp.status_code == 400:
                 logger.error(f"RCSB 400 Bad Request — check query syntax: {e}")
+                try:
+                    logger.error(f"Response body: {resp.json()}")
+                except Exception:
+                    logger.error(f"Response text: {resp.text[:500]}")
                 return []               # no point retrying a malformed query
             logger.warning(f"RCSB HTTP error (attempt {attempt+1}/{retries}): {e}")
         except Exception as e:
