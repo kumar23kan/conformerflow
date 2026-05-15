@@ -25,64 +25,14 @@ RCSB_DOWNLOAD    = "https://files.rcsb.org/download"
 # RCSB Search Queries
 # ──────────────────────────────────────────────
 
-def query_nmr_entries(min_conformers: int = 5, max_results: int = 20000) -> list:
-    """
-    Query RCSB for NMR structures with at least min_conformers models.
-    Filters: SOLUTION NMR, protein, minimum conformer count.
-    """
+def query_xray_entries(max_results=5000):
+
     query = {
         "query": {
             "type": "group",
             "logical_operator": "and",
             "nodes": [
-                {
-                    "type": "terminal",
-                    "service": "text",
-                    "parameters": {
-                        "attribute": "exptl.method",
-                        "operator": "exact_match",
-                        "value": "SOLUTION NMR"
-                    }
-                },
-                {
-                    "type": "terminal",
-                    "service": "text",
-                    "parameters": {
-                        "attribute": "entity_poly.rcsb_entity_polymer_type",
-                        "operator": "exact_match",
-                        "value": "Protein"
-                    }
-                },
-                {
-                    "type": "terminal",
-                    "service": "text",
-                    "parameters": {
-                        "attribute": "pdbx_nmr_ensemble.conformers_submitted_total_number",
-                        "operator": "greater_or_equal",
-                        "value": min_conformers
-                    }
-                }
-            ]
-        },
-        "return_type": "entry",
-        "request_options": {
-            "paginate": {"start": 0, "rows": max_results},
-            "results_content_type": ["experimental"]
-        }
-    }
-    return _execute_search(query)
 
-
-def query_xray_entries(max_results: int = 5000) -> list:
-    """
-    Query RCSB for high-quality X-ray crystal structures of proteins.
-    Filters: X-RAY DIFFRACTION, protein, resolution <= 2.5 Angstrom.
-    """
-    query = {
-        "query": {
-            "type": "group",
-            "logical_operator": "and",
-            "nodes": [
                 {
                     "type": "terminal",
                     "service": "text",
@@ -92,33 +42,65 @@ def query_xray_entries(max_results: int = 5000) -> list:
                         "value": "X-RAY DIFFRACTION"
                     }
                 },
+
                 {
                     "type": "terminal",
                     "service": "text",
                     "parameters": {
-                        "attribute": "entity_poly.rcsb_entity_polymer_type",
-                        "operator": "exact_match",
-                        "value": "Protein"
-                    }
-                },
-                {
-                    "type": "terminal",
-                    "service": "text",
-                    "parameters": {
-                        "attribute": "refine.ls_d_res_high",
+                        "attribute": "rcsb_entry_info.resolution_combined",
                         "operator": "less_or_equal",
                         "value": 2.5
                     }
                 }
             ]
         },
+
         "return_type": "entry",
+
         "request_options": {
-            "paginate": {"start": 0, "rows": max_results},
-            "results_content_type": ["experimental"]
+            "paginate": {
+                "start": 0,
+                "rows": max_results
+            }
         }
     }
-    return _execute_search(query)
+
+    return execute_search(query)
+
+
+def execute_search(query):
+
+    try:
+
+        resp = session.post(
+            RCSB_SEARCH_URL,
+            json=query,
+            timeout=120
+        )
+
+        if resp.status_code != 200:
+
+            logger.error(f"Search failed: {resp.status_code}")
+            logger.error(resp.text)
+
+            return []
+
+        data = resp.json()
+
+        ids = [
+            x["identifier"]
+            for x in data.get("result_set", [])
+        ]
+
+        logger.info(f"Search returned {len(ids)} entries")
+
+        return ids
+
+    except Exception as e:
+
+        logger.error(f"Search failed: {e}")
+
+        return []
 
 
 def _execute_search(query: dict) -> list:
