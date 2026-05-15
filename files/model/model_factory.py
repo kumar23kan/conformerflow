@@ -159,13 +159,16 @@ class ConformerFlowModel(nn.Module):
         u_t = gen_out["u_t"]
 
         # ── Generate ensemble for ensemble loss ──
+        # euler instead of heun during training: halves transformer calls (no accuracy
+        # loss for the ensemble/diversity loss since we just need diverse samples).
         z_gen = self.sampler(mu, log_var, n_samples=n_gen, use_full_cov=False)
+        train_method = ("euler" if self.gen_type == "flow_matching"
+                        else self.gen_type)
         gen_coords = self.generative.generate(
             theta, z_gen, seq_mask,
             n_conformers = n_gen,
             n_steps      = min(10, self.n_steps_inf),
-            method       = self.ode_method if self.gen_type == "flow_matching"
-                           else self.gen_type,
+            method       = train_method,
         )
 
         return {

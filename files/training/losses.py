@@ -99,9 +99,12 @@ def ensemble_reconstruction_loss(gen_coords:  torch.Tensor,
     mean_loss= mean_diff.sum() / (m.sum() * 3 + 1e-8)
 
     # ── Per-residue variance loss ──
-    # Generated and NMR should have similar per-residue flexibility
-    gen_var = gen_coords.var(dim=1)     # (B, L, 3)
-    nmr_var = nmr_coords.var(dim=1)     # (B, L, 3)
+    # Generated and NMR should have similar per-residue flexibility.
+    # .var(dim=1) needs >1 sample; clamp with correction=0 (biased) when M==1.
+    gen_var = gen_coords.var(dim=1, correction=0) if gen_coords.shape[1] > 1 \
+              else torch.zeros_like(gen_coords[:, 0])
+    nmr_var = nmr_coords.var(dim=1, correction=0) if nmr_coords.shape[1] > 1 \
+              else torch.zeros_like(nmr_coords[:, 0])
     var_loss= F.mse_loss(
         gen_var * m, nmr_var * m
     )
@@ -120,8 +123,10 @@ def ensemble_reconstruction_loss(gen_coords:  torch.Tensor,
     # Compare mean and std of distance distributions
     gen_dist_mean = gen_dists.mean(dim=1)   # (B, L, L)
     nmr_dist_mean = nmr_dists.mean(dim=1)
-    gen_dist_std  = gen_dists.std(dim=1)
-    nmr_dist_std  = nmr_dists.std(dim=1)
+    gen_dist_std  = gen_dists.std(dim=1, correction=0) if gen_dists.shape[1] > 1 \
+                    else torch.zeros_like(gen_dist_mean)
+    nmr_dist_std  = nmr_dists.std(dim=1, correction=0) if nmr_dists.shape[1] > 1 \
+                    else torch.zeros_like(nmr_dist_mean)
 
     dist_mean_loss = F.mse_loss(gen_dist_mean, nmr_dist_mean)
     dist_std_loss  = F.mse_loss(gen_dist_std,  nmr_dist_std)

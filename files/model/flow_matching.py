@@ -402,8 +402,11 @@ class FrameTransformer(nn.Module):
         )   # (B, L, d_model)
 
         # ── Transformer: the AI learns here ──
+        # Gradient checkpointing: recompute attention maps during backward
+        # instead of storing them — (B,H,L,L) per layer gone from peak memory.
+        from torch.utils.checkpoint import checkpoint
         for layer in self.layers:
-            h = layer(h, theta, seq_mask)
+            h = checkpoint(layer, h, theta, seq_mask, use_reentrant=False)
 
         h = self.final_norm(h)
 

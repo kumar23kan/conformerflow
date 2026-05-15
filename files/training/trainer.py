@@ -520,6 +520,15 @@ class Trainer:
                     batch = self._to_device(batch)
                     try:
                         losses = self._train_step(batch)
+                    except torch.cuda.OutOfMemoryError:
+                        self.optimizer.zero_grad()
+                        torch.cuda.empty_cache()
+                        logger.warning(
+                            f"[rank {self.local_rank}] "
+                            f"Step {self.global_step} OOM — clearing cache and skipping batch"
+                        )
+                        self.global_step += 1
+                        continue
                     except Exception as e:
                         logger.warning(
                             f"[rank {self.local_rank}] "

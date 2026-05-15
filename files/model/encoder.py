@@ -148,24 +148,30 @@ class InvariantPointAttention(nn.Module):
         Vp = self.v_pt(h).view(N, L, H, P, 3)
 
         # Global frame: p_global = R^T @ p_local + t
-        # R has ROWS as frame axes, so local→global requires R^T.
-        # Einsum "nlji,nlhpj->nlhpi" contracts over j (input) using R[i,j] transposed
-        # = column i of R^T, which is row i of R → R^T @ pts.
         def to_global(pts, R, t):
             # pts: (N, L, H, P, 3), R: (N, L, 3, 3), t: (N, L, 3)
             g = torch.einsum("nlji,nlhpj->nlhpi", R, pts)   # R^T @ pts  (N, L, H, P, 3)
-            g = g + t[:, :, None, None, :]                   # broadcast t
+            g = g + t[:, :, None, None, :]
             return g
 
         Qg = to_global(Qp, R, t)   # (N, L, H, P, 3)
         Kg = to_global(Kp, R, t)
         Vg = to_global(Vp, R, t)
 
-        # Pairwise point distances: (N, H, L, L)
-        # Qg[i] - Kg[j] for all i,j
-        Qg_e = Qg.permute(0,2,1,3,4).unsqueeze(3)   # (N, H, L, 1, P, 3)
-        Kg_e = Kg.permute(0,2,1,3,4).unsqueeze(2)   # (N, H, 1, L, P, 3)
-        pt_d2 = ((Qg_e - Kg_e)**2).sum(dim=-1).sum(dim=-1)  # (N, H, L, L)
+        # ── Memory-efficient pairwise point distances: (N, H, L, L) ──
+        # Use ||Qi-Kj||² = ||Qi||² + ||Kj||² - 2·Qi·Kj.
+        # Cross term via bmm on (N*H, L, P*3) — guaranteed not to materialise
+        # the (N, H, L, L, P, 3) intermediate that the original broadcast created.
+        Qg_p = Qg.permute(0, 2, 1, 3, 4)                       # (N, H, L, P, 3)
+        Kg_p = Kg.permute(0, 2, 1, 3, 4)
+        NH   = N * H
+        Qg_flat = Qg_p.reshape(NH, L, P * 3)                    # (N*H, L, P*3)
+        Kg_flat = Kg_p.reshape(NH, L, P * 3)
+        Qg_sq   = (Qg_flat ** 2).sum(dim=-1)                    # (N*H, L)
+        Kg_sq   = (Kg_flat ** 2).sum(dim=-1)                    # (N*H, L)
+        cross   = torch.bmm(Qg_flat, Kg_flat.transpose(-1, -2)) # (N*H, L, L)
+        pt_d2   = (Qg_sq.unsqueeze(-1) + Kg_sq.unsqueeze(-2) - 2 * cross
+                   ).clamp(min=0).reshape(N, H, L, L)
 
         w_pt = F.softplus(self.log_pt_w).view(1, H, 1, 1)
         a_pt = -0.5 * w_pt * pt_d2                           # (N, H, L, L)
@@ -187,11 +193,12 @@ class InvariantPointAttention(nn.Module):
         out_s = torch.einsum("nhij,njhd->nihd", attn, V)   # (N, L, H, d)
         out_s = out_s.reshape(N, L, D)                      # (N, L, D)
 
-        # ── Aggregate point values in global frame ──
-        # Vg: (N, L, H, P, 3) → permute → (N, H, L, P, 3)
-        Vg_p  = Vg.permute(0, 2, 1, 3, 4)                  # (N, H, L, P, 3)
-        attn_e= attn.unsqueeze(-1).unsqueeze(-1)            # (N, H, L, L, 1, 1)
-        Vg_agg= (attn_e * Vg_p.unsqueeze(2)).sum(dim=3)    # (N, H, L, P, 3)
+        # ── Memory-efficient point value aggregation ──
+        # Use bmm on (N*H, L, P*3) — same guarantee as the distance computation.
+        Vg_p    = Vg.permute(0, 2, 1, 3, 4)                         # (N, H, L, P, 3)
+        Vg_flat = Vg_p.reshape(NH, L, P * 3)                         # (N*H, L, P*3)
+        Vg_agg  = torch.bmm(attn.reshape(NH, L, L), Vg_flat
+                            ).reshape(N, H, L, P, 3)                  # (N, H, L, P, 3)
 
         # Bring to local frame: p_local = R @ (p_global - t)
         # R has rows as axes → to_local = R @ (p - t).
@@ -282,9 +289,13 @@ class StructureEncoder(nn.Module):
         # Combine sequence + geometry
         h = self.input_proj(torch.cat([seq_feat_f, geo["node_geom"]], dim=-1))
 
-        # IPA layers
+        # IPA layers — gradient checkpointing avoids storing per-layer attention
+        # maps (N,H,L,L) for backward; recomputes them instead (~30% more compute,
+        # but activation memory scales as O(1 layer) instead of O(n_layers)).
+        from torch.utils.checkpoint import checkpoint
         for layer in self.layers:
-            h = layer(h, R, t, rel_frames, seq_mask_f)
+            h = checkpoint(layer, h, R, t, rel_frames, seq_mask_f,
+                           use_reentrant=False)
 
         h = self.final_norm(h)
         return rearrange(h, "(b m) l d -> b m l d", b=B, m=M)

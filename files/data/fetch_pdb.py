@@ -240,6 +240,10 @@ def download_pdb(pdb_id: str, out_dir: Path, file_format: str = "pdb"):
     if out_path.exists():
         return out_path  # already downloaded
 
+    # Create directory here (not just in batch_download) so this function is
+    # safe when called from threads or directly. Idempotent on all platforms.
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     url = f"{RCSB_DOWNLOAD}/{pdb_id}.{ext}"
     try:
         resp = requests.get(url, timeout=60, stream=True)
