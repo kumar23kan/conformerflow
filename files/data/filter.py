@@ -334,12 +334,15 @@ def split_dataset(manifest: list,
     }
 
     for split_name, split_items in splits.items():
-        lengths = [x["n_residues"] for x in split_items]
-        logger.info(
-            f"{split_name:5s}: {len(split_items):5,} entries | "
-            f"seq length — mean: {np.mean(lengths):.0f}, "
-            f"min: {min(lengths)}, max: {max(lengths)}"
-        )
+        if split_items:
+            lengths = [x["n_residues"] for x in split_items]
+            logger.info(
+                f"{split_name:5s}: {len(split_items):5,} entries | "
+                f"seq length — mean: {np.mean(lengths):.0f}, "
+                f"min: {min(lengths)}, max: {max(lengths)}"
+            )
+        else:
+            logger.info(f"{split_name:5s}: 0 entries")
 
     return splits
 
@@ -394,6 +397,15 @@ def run_filter_pipeline(parsed_dir:        str,
         f"{filtered_quality} failed quality | "
         f"{filtered_paired} removed (paired held-out)"
     )
+
+    if not passed:
+        logger.error(
+            "No entries passed filtering. "
+            "Check that parse_nmr.py ran successfully and pdb_data/parsed_nmr/ "
+            "contains .npz files. Run: python data/parse_nmr.py --nmr_dir pdb_data/nmr "
+            "--output_dir pdb_data/parsed_nmr"
+        )
+        return {"train": [], "val": [], "test": []}
 
     # Split — temporal or random
     if use_temporal_split:
