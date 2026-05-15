@@ -57,7 +57,7 @@ def query_nmr_entries(min_conformers: int = 5, max_results: int = 20000) -> list
             "type": "terminal",
             "service": "text",
             "parameters": {
-                "attribute": "pdbx_nmr_ensemble.conformers_submitted_total_number",
+                "attribute": "rcsb_entry_info.deposited_model_count",
                 "operator":  "greater_or_equal",
                 "value":     min_conformers,
             }

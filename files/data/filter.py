@@ -405,7 +405,14 @@ def run_filter_pipeline(parsed_dir:        str,
             "contains .npz files. Run: python data/parse_nmr.py --nmr_dir pdb_data/nmr "
             "--output_dir pdb_data/parsed_nmr"
         )
-        return {"train": [], "val": [], "test": []}
+        empty_splits = {"train": [], "val": [], "test": []}
+        for split_name, split_items in empty_splits.items():
+            path = output_dir / f"{split_name}.json"
+            with open(path, "w") as f:
+                json.dump(split_items, f)
+        with open(output_dir / "filtered_manifest.json", "w") as f:
+            json.dump([], f)
+        return empty_splits
 
     # Split — temporal or random
     if use_temporal_split:
