@@ -549,6 +549,10 @@ class Trainer:
                     if (self.is_main and
                             self.global_step % tcfg.get("save_every", 2000) == 0):
                         self._save_checkpoint(f"step_{self.global_step}")
+                        # Delete previous step checkpoints to save disk space
+                        ckpt_dir = Path(tcfg.get("checkpoint_dir", "checkpoints"))
+                        for old in sorted(ckpt_dir.glob("ckpt_step_*.pt"))[:-1]:
+                            old.unlink()
 
                 # End-of-epoch validation — always runs regardless of val_every
                 if self.is_main:
