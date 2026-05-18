@@ -49,4 +49,4 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
+# *.ipynb  — notebooks are tracked
