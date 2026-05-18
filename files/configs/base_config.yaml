@@ -31,10 +31,10 @@ training:
   max_epochs:       100
   learning_rate:    0.0001
   weight_decay:     0.0001
-  warmup_steps:     1000
-  lr_decay_steps:   100000
+  warmup_steps:     5000    # longer warmup for large dataset (~8000 train samples)
+  lr_decay_steps:   500000  # decay over full training run
   checkpoint_dir:   checkpoints
-  n_gen_conformers: 2
+  n_gen_conformers: 5       # more conformers for better ensemble diversity
   val_every:        500
   save_every:       2000
   max_grad_norm:    1.0

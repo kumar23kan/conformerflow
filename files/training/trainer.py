@@ -188,16 +188,14 @@ class Trainer:
             decay_steps  = tcfg["lr_decay_steps"],
         )
 
-        # FIX 4: Mixed precision — bf16 vs fp16 have very different requirements.
-        # fp16: needs GradScaler (values underflow to zero without it)
-        # bf16: does NOT need GradScaler (same exponent range as fp32, no underflow)
-        #       bf16 is what A100/H100/B200 are optimised for — much faster than fp16
+        # Mixed precision:
+        # bf16 (use_bf16=True):  autocast enabled, no GradScaler needed (same exponent range as fp32)
+        # fp32 (use_bf16=False): no autocast, no GradScaler — pure fp32 avoids fp16 underflow
         use_bf16  = tcfg.get("use_bf16", False)
         use_cuda  = self.device.type == "cuda"
-        self.amp_dtype  = torch.bfloat16 if use_bf16 else torch.float16
-        self.use_amp    = use_cuda
-        # GradScaler: enabled only for fp16 (not bf16, not CPU)
-        self.scaler = GradScaler("cuda", enabled=(use_cuda and not use_bf16))
+        self.amp_dtype = torch.bfloat16
+        self.use_amp   = use_cuda and use_bf16   # autocast only when bf16 explicitly requested
+        self.scaler    = GradScaler("cuda", enabled=False)  # bf16 never needs scaler; fp32 never needs it
 
         # EMA — exponential moving average of weights for stable inference
         # decay=0.9999 is standard for flow matching / diffusion models
