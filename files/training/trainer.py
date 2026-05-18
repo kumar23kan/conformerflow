@@ -212,6 +212,8 @@ class Trainer:
         # Tracking
         self.global_step   = 0
         self.best_val_loss = float("inf")
+        self.start_epoch   = 0
+        self.current_epoch = 0
         self.gen_type      = cfg["generative_model"]["type"]
 
         # Dirs
@@ -430,6 +432,7 @@ class Trainer:
         raw_model = self.model.module if self.multi_gpu else self.model
         ckpt = {
             "global_step":   self.global_step,
+            "epoch":         self.current_epoch,
             "model_state":   raw_model.state_dict(),
             "ema_params":    self.ema_params,
             "optimizer":     self.optimizer.state_dict(),
@@ -447,10 +450,11 @@ class Trainer:
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self.scheduler._step = ckpt.get("scheduler_step", 0)
         self.global_step     = ckpt.get("global_step", 0)
+        self.start_epoch     = ckpt.get("epoch", 0)
         self.best_val_loss   = ckpt.get("best_val_loss", float("inf"))
         if "ema_params" in ckpt:
             self.ema_params  = ckpt["ema_params"]
-        logger.info(f"Resumed from {path} at step {self.global_step}")
+        logger.info(f"Resumed from {path} at epoch {self.start_epoch+1}, step {self.global_step}")
 
     @torch.no_grad()
     def _validate(self, val_loader, max_batches: int = 50) -> dict:
@@ -508,7 +512,8 @@ class Trainer:
             )
 
         try:
-            for epoch in range(tcfg["max_epochs"]):
+            for epoch in range(self.start_epoch, tcfg["max_epochs"]):
+                self.current_epoch = epoch
                 # Set epoch for DistributedSampler (ensures different shuffle each epoch)
                 if self.multi_gpu and self.world_size > 1:
                     dist_sampler.set_epoch(epoch)
