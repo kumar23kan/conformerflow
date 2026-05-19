@@ -88,6 +88,8 @@ def main():
                         help="DistributedDataParallel across all GPUs")
     parser.add_argument("--backup_dataset", type=str, default="",
                         help="Kaggle dataset ID for auto-backup (e.g. user/dataset-name)")
+    parser.add_argument("--drive_backup", type=str, default="",
+                        help="Google Drive path for auto-backup every save_every steps")
 
     args = parser.parse_args()
 
@@ -129,6 +131,7 @@ def main():
         (args.curriculum_phase1,  "training.curriculum_phase1"),
         (args.curriculum_phase2,  "training.curriculum_phase2"),
         (args.backup_dataset or None, "training.backup_dataset"),
+        (args.drive_backup or None,   "training.drive_backup"),
     ]
     for value, path in overrides:
         if value is not None:

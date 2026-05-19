@@ -422,6 +422,18 @@ class Trainer:
             log_d["lr"] = self.scheduler.get_last_lr()[0]
             self.wandb.log(log_d, step=self.global_step)
 
+    def _drive_backup(self, ckpt_dir: Path, drive_path: str):
+        """Copy latest checkpoints to Google Drive for persistence."""
+        import shutil
+        dst = Path(drive_path)
+        dst.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        for f in ckpt_dir.glob("*.pt"):
+            shutil.copy2(f, dst / f.name)
+            copied += 1
+        if copied:
+            logger.info(f"Drive backup: {copied} checkpoint(s) → {dst} at step {self.global_step}")
+
     def _kaggle_backup(self, ckpt_dir: Path, dataset_id: str):
         """Push latest checkpoints to a Kaggle dataset for persistence."""
         import json, shutil, subprocess
@@ -543,6 +555,11 @@ class Trainer:
                     batch = self._to_device(batch)
                     try:
                         losses = self._train_step(batch)
+                        # Skip NaN batches silently
+                        if losses.get("total_loss") != losses.get("total_loss"):  # NaN check
+                            logger.warning(f"Step {self.global_step}: NaN loss — skipping batch")
+                            self.global_step += 1
+                            continue
                     except torch.cuda.OutOfMemoryError:
                         self.optimizer.zero_grad()
                         torch.cuda.empty_cache()
@@ -577,6 +594,9 @@ class Trainer:
                         backup_ds = tcfg.get("backup_dataset", "")
                         if backup_ds:
                             self._kaggle_backup(ckpt_dir, backup_ds)
+                        drive_bak = tcfg.get("drive_backup", "")
+                        if drive_bak:
+                            self._drive_backup(ckpt_dir, drive_bak)
 
                 # End-of-epoch validation — always runs regardless of val_every
                 if self.is_main:
