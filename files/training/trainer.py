@@ -607,6 +607,11 @@ class Trainer:
                         self._save_checkpoint("best")
                         logger.info(f"Best val loss: {self.best_val_loss:.4f}")
                     self._save_checkpoint("latest")
+                    # Drive backup every epoch (critical for Colab sessions)
+                    drive_bak = tcfg.get("drive_backup", "")
+                    if drive_bak:
+                        ckpt_dir = Path(tcfg.get("checkpoint_dir", "checkpoints"))
+                        self._drive_backup(ckpt_dir, drive_bak)
 
         finally:
             # Always cleanup DDP — even if training crashes
