@@ -422,6 +422,26 @@ class Trainer:
             log_d["lr"] = self.scheduler.get_last_lr()[0]
             self.wandb.log(log_d, step=self.global_step)
 
+    def _kaggle_backup(self, ckpt_dir: Path, dataset_id: str):
+        """Push latest checkpoints to a Kaggle dataset for persistence."""
+        import json, shutil, subprocess
+        backup_dir = Path("/kaggle/working/ckpt_backup")
+        backup_dir.mkdir(exist_ok=True)
+        for f in ckpt_dir.glob("*.pt"):
+            shutil.copy(f, backup_dir / f.name)
+        meta = {"title": dataset_id.split("/")[-1], "id": dataset_id,
+                "licenses": [{"name": "CC0-1.0"}]}
+        (backup_dir / "dataset-metadata.json").write_text(json.dumps(meta))
+        # Try version update first, fall back to create
+        ret = subprocess.run(
+            ["kaggle", "datasets", "version", "-p", str(backup_dir), "-m", f"step {self.global_step}"],
+            capture_output=True)
+        if ret.returncode != 0:
+            subprocess.run(
+                ["kaggle", "datasets", "create", "-p", str(backup_dir), "--dir-mode", "zip"],
+                capture_output=True)
+        logger.info(f"Kaggle backup pushed: {dataset_id} at step {self.global_step}")
+
     def _save_checkpoint(self, tag: str = "latest"):
         # Only rank-0 saves checkpoints
         if not self.is_main:
@@ -553,6 +573,10 @@ class Trainer:
                         ckpt_dir = Path(tcfg.get("checkpoint_dir", "checkpoints"))
                         for old in sorted(ckpt_dir.glob("ckpt_step_*.pt"))[:-1]:
                             old.unlink()
+                        # Auto-backup to Kaggle dataset if backup_dataset configured
+                        backup_ds = tcfg.get("backup_dataset", "")
+                        if backup_ds:
+                            self._kaggle_backup(ckpt_dir, backup_ds)
 
                 # End-of-epoch validation — always runs regardless of val_every
                 if self.is_main:

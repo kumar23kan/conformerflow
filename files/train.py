@@ -86,6 +86,8 @@ def main():
                         help="bfloat16 mixed precision (A100/H100/B200)")
     parser.add_argument("--multi_gpu", action="store_true",
                         help="DistributedDataParallel across all GPUs")
+    parser.add_argument("--backup_dataset", type=str, default="",
+                        help="Kaggle dataset ID for auto-backup (e.g. user/dataset-name)")
 
     args = parser.parse_args()
 
@@ -126,6 +128,7 @@ def main():
         (args.kl_anneal_epochs,   "training.kl_anneal_epochs"),
         (args.curriculum_phase1,  "training.curriculum_phase1"),
         (args.curriculum_phase2,  "training.curriculum_phase2"),
+        (args.backup_dataset or None, "training.backup_dataset"),
     ]
     for value, path in overrides:
         if value is not None:
